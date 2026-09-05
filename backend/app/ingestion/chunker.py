@@ -22,26 +22,41 @@ def chunk_text(text: str, chunk_size: int = 500, overlap: int = 50) -> list[str]
     Returns:
         A list of chunk strings (words rejoined with single spaces, so
         original whitespace/newlines are not preserved verbatim). Empty
-        input yields an empty list.
+        (or whitespace-only) input unconditionally yields an empty list,
+        even if `chunk_size`/`overlap` are themselves invalid — there's
+        nothing to chunk, so there's nothing to validate parameters
+        against.
 
     Raises:
-        ValueError: if `chunk_size` isn't positive, or `overlap` is
-            negative or >= `chunk_size` (an overlap that large or larger
-            would make consecutive chunks near-duplicates of each other,
-            one word apart, instead of a meaningful sliding window).
+        ValueError: if `text` is non-empty and `chunk_size` isn't
+            positive, or `overlap` is negative or more than half of
+            `chunk_size`. The half-of-chunk_size cap (not just
+            `overlap < chunk_size`) is what it takes to actually prevent
+            degenerate chunks: an overlap merely *close* to chunk_size
+            can still re-swallow an entire chunk's worth of words into
+            the next one, producing a chunk with no new content.
+
+    Note:
+        Overlap is itself word-boundary-respecting and thus best-effort:
+        if a chunk ends up being a single word longer than `overlap` (or
+        longer than `chunk_size` itself, which single words are allowed
+        to be — see above), there's no whole word short enough to carry
+        over, so the next chunk starts fresh with zero overlap rather
+        than splitting that word.
     """
+    words = text.split()
+    if not words:
+        return []
+
     if chunk_size <= 0:
         raise ValueError(f"chunk_size must be positive, got {chunk_size}")
     if overlap < 0:
         raise ValueError(f"overlap must be >= 0, got {overlap}")
-    if overlap >= chunk_size:
+    if overlap > chunk_size // 2:
         raise ValueError(
-            f"overlap ({overlap}) must be smaller than chunk_size ({chunk_size})"
+            f"overlap ({overlap}) must be at most half of chunk_size "
+            f"({chunk_size} // 2 = {chunk_size // 2})"
         )
-
-    words = text.split()
-    if not words:
-        return []
 
     chunks: list[str] = []
     start = 0

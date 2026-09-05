@@ -95,12 +95,38 @@ def test_chunk_text_single_word_longer_than_chunk_size_is_kept_whole():
     assert long_word in all_words
 
 
+def test_chunk_text_overlap_around_an_oversized_word_is_best_effort():
+    # Known, documented limitation: when a chunk is a single word longer
+    # than `overlap` (here, longer than `chunk_size` itself), there's no
+    # whole word short enough to carry over without splitting it — so
+    # overlap silently becomes 0 at that boundary instead of erroring or
+    # violating the "never split a word" contract.
+    long_word = "x" * 300
+    text = f"short {long_word} tail"
+
+    chunks = chunk_text(text, chunk_size=50, overlap=10)
+
+    assert chunks == ["short", long_word, "tail"]
+
+
 def test_chunk_text_overlap_greater_than_or_equal_to_chunk_size_raises():
     with pytest.raises(ValueError):
         chunk_text("some words here", chunk_size=20, overlap=20)
 
     with pytest.raises(ValueError):
         chunk_text("some words here", chunk_size=20, overlap=100)
+
+
+def test_chunk_text_overlap_more_than_half_chunk_size_raises():
+    # overlap < chunk_size alone isn't enough: an overlap merely *close* to
+    # chunk_size can still swallow an entire chunk's worth of words into
+    # the next one (see test_chunk_text_overlap_never_reproduces_a_whole_chunk
+    # for the concrete degenerate case this prevents).
+    with pytest.raises(ValueError):
+        chunk_text("some words here", chunk_size=20, overlap=15)
+
+    # Exactly half is allowed.
+    chunk_text("some words here", chunk_size=20, overlap=10)
 
 
 def test_chunk_text_negative_overlap_raises():
@@ -111,3 +137,31 @@ def test_chunk_text_negative_overlap_raises():
 def test_chunk_text_non_positive_chunk_size_raises():
     with pytest.raises(ValueError):
         chunk_text("some words here", chunk_size=0, overlap=0)
+
+
+def test_chunk_text_empty_text_returns_empty_list_even_with_invalid_params():
+    # Nothing to chunk means nothing to validate parameters against —
+    # empty input always short-circuits before chunk_size/overlap checks.
+    assert chunk_text("", chunk_size=0, overlap=0) == []
+    assert chunk_text("   ", chunk_size=-5, overlap=-5) == []
+
+
+def test_chunk_text_overlap_never_reproduces_a_whole_chunk():
+    # Regression test: chunk_size=5, overlap=4 used to make the previous
+    # chunk's overlap window swallow the *entire* previous chunk, so the
+    # next chunk ('bb') was a strict subset of the one before it ('a bb')
+    # with zero new words. The overlap<=chunk_size//2 rule now rejects
+    # this configuration outright rather than silently producing it.
+    with pytest.raises(ValueError):
+        chunk_text("a bb ccc dddd eeeee ffffff", chunk_size=5, overlap=4)
+
+    words = [f"w{i}" for i in range(30)]
+    text = " ".join(words)
+    chunks = chunk_text(text, chunk_size=10, overlap=5)
+
+    for first, second in zip(chunks, chunks[1:]):
+        first_words = first.split()
+        second_words = second.split()
+        assert set(second_words) - set(first_words), (
+            f"{second!r} added no new words over {first!r}"
+        )
