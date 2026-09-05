@@ -10,14 +10,20 @@ means a chunk goes slightly over `chunk_size` (e.g. a single word longer than
 """
 
 
-def chunk_text(text: str, chunk_size: int = 500, overlap: int = 50) -> list[str]:
+def chunk_text(
+    text: str, chunk_size: int = 500, overlap: int | None = None
+) -> list[str]:
     """Split `text` into overlapping, word-boundary-respecting chunks.
 
     Args:
         text: the text to split.
         chunk_size: target max characters per chunk.
         overlap: target characters of overlap carried from the end of one
-            chunk into the start of the next.
+            chunk into the start of the next. Defaults to `min(50,
+            chunk_size // 2)` — plain `50` for the documented default
+            chunk_size (500), scaled down automatically for a smaller
+            chunk_size so the defaults never conflict. Pass an explicit
+            value to opt out of that scaling.
 
     Returns:
         A list of chunk strings (words rejoined with single spaces, so
@@ -51,6 +57,8 @@ def chunk_text(text: str, chunk_size: int = 500, overlap: int = 50) -> list[str]
 
     if chunk_size <= 0:
         raise ValueError(f"chunk_size must be positive, got {chunk_size}")
+    if overlap is None:
+        overlap = min(50, chunk_size // 2)
     if overlap < 0:
         raise ValueError(f"overlap must be >= 0, got {overlap}")
     if overlap > chunk_size // 2:
@@ -62,8 +70,9 @@ def chunk_text(text: str, chunk_size: int = 500, overlap: int = 50) -> list[str]
     n = len(words)
     chunks: list[str] = []
     start = 0
-    prev_end = 0
-    is_first_chunk = True
+    prev_end = 0  # end of the previous chunk; 0 can never trigger the
+    # guard below on the first iteration, since _build_chunk always
+    # includes at least one word (idx ends up >= 1 > 0).
 
     while start < n:
         chunk_words, idx = _build_chunk(words, start, chunk_size)
@@ -74,13 +83,12 @@ def chunk_text(text: str, chunk_size: int = 500, overlap: int = 50) -> list[str]
         # follows it (e.g. a long word right after the boundary). Fall
         # back to zero overlap here instead of emitting a chunk with no
         # new content.
-        if not is_first_chunk and idx <= prev_end:
+        if idx <= prev_end:
             start = prev_end
             chunk_words, idx = _build_chunk(words, start, chunk_size)
 
         chunks.append(" ".join(chunk_words))
         prev_end = idx
-        is_first_chunk = False
 
         if idx >= n:
             break

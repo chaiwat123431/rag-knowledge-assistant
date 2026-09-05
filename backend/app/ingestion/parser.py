@@ -38,22 +38,22 @@ def extract_text(file_path: str) -> str:
     Raises:
         FileNotFoundError: if `file_path` doesn't exist.
         IsADirectoryError: if `file_path` is a directory.
-        OSError: if `file_path` exists but isn't a regular file (e.g. a
-            named pipe or device file).
+        OSError: for other access failures (permission denied, a device
+            file, etc). Catch this (its parent class) to handle any
+            access problem generically rather than catching
+            FileNotFoundError alone.
         UnsupportedFileTypeError: if the file extension isn't supported.
         TextDecodingError: if a .txt/.md file isn't valid UTF-8 text.
         PdfExtractionError: if a .pdf file can't be parsed.
     """
     path = Path(file_path)
-
-    if not path.exists():
-        raise FileNotFoundError(f"File not found: {file_path}")
-    if path.is_dir():
-        raise IsADirectoryError(f"Expected a file but got a directory: {file_path}")
-    if not path.is_file():
-        raise OSError(f"Path exists but is not a regular file: {file_path}")
-
     extension = path.suffix.lower()
+
+    # No manual exists()/is_file() pre-check: read_text() and PdfReader()
+    # already open the path themselves and raise the correctly-typed
+    # FileNotFoundError/IsADirectoryError/PermissionError natively, so a
+    # separate check here would just add a stat() call and a TOCTOU race
+    # against the actual read without adding any real safety.
 
     if extension in SUPPORTED_TEXT_EXTENSIONS:
         try:
@@ -70,10 +70,20 @@ def extract_text(file_path: str) -> str:
             reader = PdfReader(str(path))
             pages = [page.extract_text() or "" for page in reader.pages]
             return "\n".join(pages)
+        except OSError:
+            # Missing file / directory / permission-denied — not a
+            # corrupt PDF, so let the native exception through as-is.
+            raise
         except Exception as exc:
             raise PdfExtractionError(
                 f"Could not extract text from PDF {file_path}: {exc}"
             ) from exc
+
+    # Only checked here: for a supported extension we let read_text()/
+    # PdfReader() report a missing path natively (see above); for an
+    # unsupported one there's no read attempt to raise it for us.
+    if not path.exists():
+        raise FileNotFoundError(f"File not found: {file_path}")
 
     supported = sorted(SUPPORTED_TEXT_EXTENSIONS | SUPPORTED_PDF_EXTENSIONS)
     raise UnsupportedFileTypeError(

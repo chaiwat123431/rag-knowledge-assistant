@@ -19,6 +19,21 @@ def test_chunk_text_shorter_than_chunk_size_returns_single_chunk():
     assert result == [text]
 
 
+def test_chunk_text_default_overlap_scales_down_with_small_chunk_size():
+    # Regression test: the default overlap used to be a flat 50, which
+    # violated the overlap<=chunk_size//2 rule for any chunk_size<100
+    # (e.g. chunk_size=80 with the implicit default overlap=50 used to
+    # raise ValueError). The default now scales down automatically.
+    words = [f"word{i}" for i in range(100)]
+    text = " ".join(words)
+
+    chunks = chunk_text(text, chunk_size=80)  # overlap left at default
+
+    assert len(chunks) > 1
+    for chunk in chunks:
+        assert len(chunk) <= 80
+
+
 def test_chunk_text_splits_long_text_into_multiple_chunks():
     words = [f"word{i}" for i in range(200)]  # ~1189 chars incl. spaces
     text = " ".join(words)

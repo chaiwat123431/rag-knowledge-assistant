@@ -111,3 +111,24 @@ def test_extract_text_directory_raises_is_a_directory_error(tmp_path):
 
     with pytest.raises(IsADirectoryError):
         extract_text(str(directory))
+
+
+def test_extract_text_missing_pdf_raises_file_not_found_not_pdf_error(tmp_path):
+    # A missing .pdf is an access problem, not a corrupt PDF — it must
+    # come through as FileNotFoundError, not get relabeled
+    # PdfExtractionError by the generic `except Exception` branch.
+    missing = tmp_path / "does_not_exist.pdf"
+
+    with pytest.raises(FileNotFoundError):
+        extract_text(str(missing))
+
+
+def test_extract_text_missing_file_unsupported_extension_raises_file_not_found(
+    tmp_path,
+):
+    # Existence is checked before reporting "unsupported type" for a
+    # format we'd never have opened anyway.
+    missing = tmp_path / "does_not_exist.docx"
+
+    with pytest.raises(FileNotFoundError):
+        extract_text(str(missing))
