@@ -26,7 +26,7 @@ files.
 | Vector DB | Chroma (local) | No external service dependency during dev; easy to swap for Pinecone later if deploying at scale |
 | RAG framework | LangChain | Industry-standard, widely referenced in job postings |
 | Embeddings | OpenAI `text-embedding-3-small` | Cheap, well-documented, good baseline quality |
-| Chunking | Recursive character splitter, ~500 tokens, 50 token overlap | Balances context completeness vs. retrieval precision |
+| Chunking | Recursive character splitter, ~500 tokens, 50 token overlap | Balances context completeness vs. retrieval precision. **Implemented as a custom word-boundary splitter instead** (character-based, no token count), not LangChain's `RecursiveCharacterTextSplitter` — revisit if paragraph/sentence-aware splitting turns out to matter once retrieval quality is measured. |
 | Frontend | Next.js + TypeScript | Separate phase; not part of Phase 1 |
 
 ## Data Flow
@@ -47,8 +47,8 @@ rag-assistant/
 │   ├── app/
 │   │   ├── main.py              # FastAPI entrypoint
 │   │   ├── ingestion/
-│   │   │   ├── parser.py        # PDF/text extraction
-│   │   │   └── chunker.py       # text splitting logic
+│   │   │   ├── parser.py        # PDF/text extraction [done]
+│   │   │   └── chunker.py       # text splitting logic [done]
 │   │   ├── retrieval/
 │   │   │   ├── embeddings.py    # embedding generation
 │   │   │   └── vector_store.py  # Chroma interface
@@ -66,6 +66,15 @@ rag-assistant/
 - Unit tests for parser, chunker, embeddings, vector store — each in isolation
 - Integration test: full ingest -> query -> answer flow on a small fixture document
 - Tests written alongside each module, not deferred to a later phase
+
+## Progress
+
+- [x] Project scaffold (FastAPI app + health check) — `feature/project-scaffold`, PR #1
+- [x] Ingestion pipeline (`parser.py`, `chunker.py` + tests) — `feature/ingestion-pipeline`, PR #2, merged 2026-09-05
+- [ ] Retrieval core (embeddings + Chroma vector store) — `feature/retrieval-core`
+- [ ] Query flow (question -> retrieve -> prompt -> answer with citations)
+- [ ] Conversational follow-up memory
+- [ ] Frontend (Phase 3)
 
 ## Git Workflow
 - `main` branch stays stable/working
