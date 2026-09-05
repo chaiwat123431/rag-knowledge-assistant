@@ -23,7 +23,22 @@ def chunk_text(text: str, chunk_size: int = 500, overlap: int = 50) -> list[str]
         A list of chunk strings (words rejoined with single spaces, so
         original whitespace/newlines are not preserved verbatim). Empty
         input yields an empty list.
+
+    Raises:
+        ValueError: if `chunk_size` isn't positive, or `overlap` is
+            negative or >= `chunk_size` (an overlap that large or larger
+            would make consecutive chunks near-duplicates of each other,
+            one word apart, instead of a meaningful sliding window).
     """
+    if chunk_size <= 0:
+        raise ValueError(f"chunk_size must be positive, got {chunk_size}")
+    if overlap < 0:
+        raise ValueError(f"overlap must be >= 0, got {overlap}")
+    if overlap >= chunk_size:
+        raise ValueError(
+            f"overlap ({overlap}) must be smaller than chunk_size ({chunk_size})"
+        )
+
     words = text.split()
     if not words:
         return []

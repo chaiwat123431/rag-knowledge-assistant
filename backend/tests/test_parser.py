@@ -1,7 +1,12 @@
 import pytest
 from pypdf import PdfWriter
 
-from app.ingestion.parser import UnsupportedFileTypeError, extract_text
+from app.ingestion.parser import (
+    PdfExtractionError,
+    TextDecodingError,
+    UnsupportedFileTypeError,
+    extract_text,
+)
 
 
 def _make_pdf(path, text="Hello from a test PDF."):
@@ -74,4 +79,27 @@ def test_extract_text_unsupported_extension_raises(tmp_path):
     file_path.write_text("irrelevant", encoding="utf-8")
 
     with pytest.raises(UnsupportedFileTypeError):
+        extract_text(str(file_path))
+
+
+def test_extract_text_strips_utf8_bom(tmp_path):
+    file_path = tmp_path / "note.txt"
+    file_path.write_bytes("Hello world".encode("utf-8-sig"))
+
+    assert extract_text(str(file_path)) == "Hello world"
+
+
+def test_extract_text_non_utf8_file_raises_clear_error(tmp_path):
+    file_path = tmp_path / "note.txt"
+    file_path.write_bytes("café résumé".encode("latin-1"))
+
+    with pytest.raises(TextDecodingError):
+        extract_text(str(file_path))
+
+
+def test_extract_text_corrupt_pdf_raises_clear_error(tmp_path):
+    file_path = tmp_path / "broken.pdf"
+    file_path.write_bytes(b"not a real pdf file content")
+
+    with pytest.raises(PdfExtractionError):
         extract_text(str(file_path))

@@ -1,3 +1,5 @@
+import pytest
+
 from app.ingestion.chunker import chunk_text
 
 
@@ -91,3 +93,21 @@ def test_chunk_text_single_word_longer_than_chunk_size_is_kept_whole():
 
     all_words = set(" ".join(chunks).split())
     assert long_word in all_words
+
+
+def test_chunk_text_overlap_greater_than_or_equal_to_chunk_size_raises():
+    with pytest.raises(ValueError):
+        chunk_text("some words here", chunk_size=20, overlap=20)
+
+    with pytest.raises(ValueError):
+        chunk_text("some words here", chunk_size=20, overlap=100)
+
+
+def test_chunk_text_negative_overlap_raises():
+    with pytest.raises(ValueError):
+        chunk_text("some words here", chunk_size=20, overlap=-1)
+
+
+def test_chunk_text_non_positive_chunk_size_raises():
+    with pytest.raises(ValueError):
+        chunk_text("some words here", chunk_size=0, overlap=0)

@@ -17,6 +17,14 @@ class UnsupportedFileTypeError(ValueError):
     """Raised when the file extension isn't one we know how to parse."""
 
 
+class TextDecodingError(ValueError):
+    """Raised when a .txt/.md file can't be decoded as text."""
+
+
+class PdfExtractionError(ValueError):
+    """Raised when a .pdf file can't be parsed (corrupt, malformed, encrypted...)."""
+
+
 def extract_text(file_path: str) -> str:
     """Extract raw text from a document.
 
@@ -30,6 +38,8 @@ def extract_text(file_path: str) -> str:
     Raises:
         FileNotFoundError: if `file_path` doesn't exist.
         UnsupportedFileTypeError: if the file extension isn't supported.
+        TextDecodingError: if a .txt/.md file isn't valid UTF-8 text.
+        PdfExtractionError: if a .pdf file can't be parsed.
     """
     path = Path(file_path)
 
@@ -39,12 +49,24 @@ def extract_text(file_path: str) -> str:
     extension = path.suffix.lower()
 
     if extension in SUPPORTED_TEXT_EXTENSIONS:
-        return path.read_text(encoding="utf-8")
+        try:
+            # utf-8-sig transparently strips a leading UTF-8 BOM (common
+            # from Windows editors) while still reading plain UTF-8 fine.
+            return path.read_text(encoding="utf-8-sig")
+        except UnicodeDecodeError as exc:
+            raise TextDecodingError(
+                f"Could not decode {file_path} as UTF-8 text: {exc}"
+            ) from exc
 
     if extension in SUPPORTED_PDF_EXTENSIONS:
-        reader = PdfReader(str(path))
-        pages = [page.extract_text() or "" for page in reader.pages]
-        return "\n".join(pages)
+        try:
+            reader = PdfReader(str(path))
+            pages = [page.extract_text() or "" for page in reader.pages]
+            return "\n".join(pages)
+        except Exception as exc:
+            raise PdfExtractionError(
+                f"Could not extract text from PDF {file_path}: {exc}"
+            ) from exc
 
     supported = sorted(SUPPORTED_TEXT_EXTENSIONS | SUPPORTED_PDF_EXTENSIONS)
     raise UnsupportedFileTypeError(
