@@ -31,18 +31,19 @@ def chunk_text(text: str, chunk_size: int = 500, overlap: int = 50) -> list[str]
         ValueError: if `text` is non-empty and `chunk_size` isn't
             positive, or `overlap` is negative or more than half of
             `chunk_size`. The half-of-chunk_size cap (not just
-            `overlap < chunk_size`) is what it takes to actually prevent
-            degenerate chunks: an overlap merely *close* to chunk_size
-            can still re-swallow an entire chunk's worth of words into
-            the next one, producing a chunk with no new content.
+            `overlap < chunk_size`) rules out the *typical* way overlap
+            can swallow a whole chunk, but isn't sufficient on its own —
+            see the Note below for the case that still needs a runtime
+            fallback.
 
     Note:
-        Overlap is itself word-boundary-respecting and thus best-effort:
-        if a chunk ends up being a single word longer than `overlap` (or
-        longer than `chunk_size` itself, which single words are allowed
-        to be — see above), there's no whole word short enough to carry
-        over, so the next chunk starts fresh with zero overlap rather
-        than splitting that word.
+        Overlap is word-boundary-respecting and thus best-effort: it can
+        end up smaller than requested, including 0, whenever honoring it
+        exactly would produce a chunk with no new content — e.g. a chunk
+        that's a single word longer than `overlap` (nothing short enough
+        to carry over), or an overlap window immediately followed by a
+        word too long to fit alongside it in the same chunk_size budget.
+        Either way, we never split a word to force an exact overlap.
     """
     words = text.split()
     if not words:
@@ -58,27 +59,28 @@ def chunk_text(text: str, chunk_size: int = 500, overlap: int = 50) -> list[str]
             f"({chunk_size} // 2 = {chunk_size // 2})"
         )
 
+    n = len(words)
     chunks: list[str] = []
     start = 0
-    n = len(words)
+    prev_end = 0
+    is_first_chunk = True
 
     while start < n:
-        # Grow the chunk word by word until the next word would push it
-        # over chunk_size. The first word is always accepted, even if it
-        # alone exceeds chunk_size, since we never split a word.
-        current_words: list[str] = []
-        current_len = 0
-        idx = start
-        while idx < n:
-            word = words[idx]
-            added_len = len(word) + (1 if current_words else 0)  # + space
-            if current_words and current_len + added_len > chunk_size:
-                break
-            current_words.append(word)
-            current_len += added_len
-            idx += 1
+        chunk_words, idx = _build_chunk(words, start, chunk_size)
 
-        chunks.append(" ".join(current_words))
+        # If this chunk doesn't extend past where the previous chunk
+        # ended, every word in it was already covered — the overlap
+        # window ate the whole budget and left no room for the word that
+        # follows it (e.g. a long word right after the boundary). Fall
+        # back to zero overlap here instead of emitting a chunk with no
+        # new content.
+        if not is_first_chunk and idx <= prev_end:
+            start = prev_end
+            chunk_words, idx = _build_chunk(words, start, chunk_size)
+
+        chunks.append(" ".join(chunk_words))
+        prev_end = idx
+        is_first_chunk = False
 
         if idx >= n:
             break
@@ -100,3 +102,29 @@ def chunk_text(text: str, chunk_size: int = 500, overlap: int = 50) -> list[str]
         start = max(overlap_start, start + 1)
 
     return chunks
+
+
+def _build_chunk(
+    words: list[str], start: int, chunk_size: int
+) -> tuple[list[str], int]:
+    """Greedily accumulate words[start:] up to chunk_size characters.
+
+    The first word is always accepted even if it alone exceeds
+    chunk_size, since a word is never split.
+
+    Returns:
+        (words included in the chunk, index just past the last one).
+    """
+    current_words: list[str] = []
+    current_len = 0
+    idx = start
+    n = len(words)
+    while idx < n:
+        word = words[idx]
+        added_len = len(word) + (1 if current_words else 0)  # + space
+        if current_words and current_len + added_len > chunk_size:
+            break
+        current_words.append(word)
+        current_len += added_len
+        idx += 1
+    return current_words, idx

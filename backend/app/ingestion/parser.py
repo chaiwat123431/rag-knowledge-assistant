@@ -37,14 +37,21 @@ def extract_text(file_path: str) -> str:
 
     Raises:
         FileNotFoundError: if `file_path` doesn't exist.
+        IsADirectoryError: if `file_path` is a directory.
+        OSError: if `file_path` exists but isn't a regular file (e.g. a
+            named pipe or device file).
         UnsupportedFileTypeError: if the file extension isn't supported.
         TextDecodingError: if a .txt/.md file isn't valid UTF-8 text.
         PdfExtractionError: if a .pdf file can't be parsed.
     """
     path = Path(file_path)
 
-    if not path.is_file():
+    if not path.exists():
         raise FileNotFoundError(f"File not found: {file_path}")
+    if path.is_dir():
+        raise IsADirectoryError(f"Expected a file but got a directory: {file_path}")
+    if not path.is_file():
+        raise OSError(f"Path exists but is not a regular file: {file_path}")
 
     extension = path.suffix.lower()
 

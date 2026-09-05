@@ -103,3 +103,11 @@ def test_extract_text_corrupt_pdf_raises_clear_error(tmp_path):
 
     with pytest.raises(PdfExtractionError):
         extract_text(str(file_path))
+
+
+def test_extract_text_directory_raises_is_a_directory_error(tmp_path):
+    directory = tmp_path / "some_folder.txt"
+    directory.mkdir()
+
+    with pytest.raises(IsADirectoryError):
+        extract_text(str(directory))

@@ -109,6 +109,25 @@ def test_chunk_text_overlap_around_an_oversized_word_is_best_effort():
     assert chunks == ["short", long_word, "tail"]
 
 
+def test_chunk_text_overlap_falls_back_to_zero_when_next_word_is_too_long():
+    # Regression test: overlap<=chunk_size//2 alone doesn't guarantee
+    # progress — a long word landing right after the overlap boundary
+    # can still leave no room for anything new, so the chunk built from
+    # the overlap window ('bbbbb', a subset of the previous chunk) must
+    # be discarded in favor of restarting from zero overlap.
+    text = "aaaaa bbbbb " + "c" * 16
+
+    chunks = chunk_text(text, chunk_size=11, overlap=5)
+
+    assert chunks == ["aaaaa bbbbb", "c" * 16]
+    for first, second in zip(chunks, chunks[1:]):
+        first_words = first.split()
+        second_words = second.split()
+        assert set(second_words) - set(first_words), (
+            f"{second!r} added no new words over {first!r}"
+        )
+
+
 def test_chunk_text_overlap_greater_than_or_equal_to_chunk_size_raises():
     with pytest.raises(ValueError):
         chunk_text("some words here", chunk_size=20, overlap=20)
