@@ -52,8 +52,8 @@ rag-assistant/
 │   │   │   ├── parser.py        # PDF/text extraction [done]
 │   │   │   └── chunker.py       # text splitting logic [done]
 │   │   ├── retrieval/
-│   │   │   ├── embeddings.py    # embedding generation
-│   │   │   └── vector_store.py  # Chroma interface
+│   │   │   ├── embeddings.py    # embedding generation [done]
+│   │   │   └── vector_store.py  # Chroma interface [done]
 │   │   └── api/
 │   │       └── routes.py        # HTTP endpoints
 │   ├── tests/
@@ -73,8 +73,10 @@ rag-assistant/
 
 - [x] Project scaffold (FastAPI app + health check) — `feature/project-scaffold`, PR #1
 - [x] Ingestion pipeline (`parser.py`, `chunker.py` + tests) — `feature/ingestion-pipeline`, PR #2, merged 2026-09-05
-- [ ] Retrieval core (embeddings + Chroma vector store) — `feature/retrieval-core`
-  - Embeddings now via local `sentence-transformers` instead of the OpenAI API (see Architecture Decisions)
+- [x] Retrieval core (`embeddings.py` + `vector_store.py` + tests) — `feature/retrieval-core`, PR #3
+  - Embeddings via local `sentence-transformers` (`all-MiniLM-L6-v2`) instead of the OpenAI API (see Architecture Decisions)
+  - `VectorStore`: persistent Chroma collection (cosine), `add_documents(chunks, source)` / `query(question, top_k)` returning chunks with `source`/`chunk_index` metadata + similarity score
+  - Model- and Chroma-loading tests marked `@pytest.mark.model` (deselect offline with `-m "not model"`)
 - [ ] Query flow (question -> retrieve -> prompt -> answer with citations)
   - LLM: Ollama locally for dev, Gemini Flash (free tier) for prod/deploy
 - [ ] Conversational follow-up memory
