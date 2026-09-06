@@ -25,7 +25,9 @@ files.
 | Backend | Python + FastAPI | Best ecosystem for RAG/LLM tooling (LangChain, embeddings libs) |
 | Vector DB | Chroma (local) | No external service dependency during dev; easy to swap for Pinecone later if deploying at scale |
 | RAG framework | LangChain | Industry-standard, widely referenced in job postings |
-| Embeddings | OpenAI `text-embedding-3-small` | Cheap, well-documented, good baseline quality |
+| Embeddings | `sentence-transformers` (local, e.g. `all-MiniLM-L6-v2`) | Runs locally, no API cost or key, good baseline quality for a single-user portfolio project. Was OpenAI `text-embedding-3-small`; switched to avoid paid API dependency. |
+| LLM (dev) | Ollama (local) | Free local inference during development; no rate limits or keys while iterating |
+| LLM (prod) | Google Gemini API — Flash model (free tier) | Free tier covers portfolio-scale usage; no local GPU needed on the deployment host. Replaces the earlier implicit OpenAI assumption. |
 | Chunking | Recursive character splitter, ~500 tokens, 50 token overlap | Balances context completeness vs. retrieval precision. **Implemented as a custom word-boundary splitter instead** (character-based, no token count), not LangChain's `RecursiveCharacterTextSplitter` — revisit if paragraph/sentence-aware splitting turns out to matter once retrieval quality is measured. |
 | Frontend | Next.js + TypeScript | Separate phase; not part of Phase 1 |
 
@@ -72,7 +74,9 @@ rag-assistant/
 - [x] Project scaffold (FastAPI app + health check) — `feature/project-scaffold`, PR #1
 - [x] Ingestion pipeline (`parser.py`, `chunker.py` + tests) — `feature/ingestion-pipeline`, PR #2, merged 2026-09-05
 - [ ] Retrieval core (embeddings + Chroma vector store) — `feature/retrieval-core`
+  - Embeddings now via local `sentence-transformers` instead of the OpenAI API (see Architecture Decisions)
 - [ ] Query flow (question -> retrieve -> prompt -> answer with citations)
+  - LLM: Ollama locally for dev, Gemini Flash (free tier) for prod/deploy
 - [ ] Conversational follow-up memory
 - [ ] Frontend (Phase 3)
 
