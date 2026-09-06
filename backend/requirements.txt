@@ -1,8 +1,8 @@
 fastapi
 uvicorn
 langchain
-langchain-openai
 chromadb
+sentence-transformers
 pypdf
 python-dotenv
 pytest
