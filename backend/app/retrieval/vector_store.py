@@ -35,8 +35,9 @@ spaces, so exact source offsets aren't recoverable anyway).
 
 Client initialisation
 ---------------------
-`chromadb.PersistentClient(path=...)` persists to disk and reloads on
-restart. Clients are cached per resolved path in a module-level dict
+`chromadb.PersistentClient(path=...)` writes to disk and reloads that
+directory when a fresh process opens it. Clients are cached per resolved
+path in a module-level dict
 guarded by a `Lock` (the same double-checked-locking pattern as the
 embeddings model singleton). Keying on the path — rather than a bare
 process singleton — lets each test point at its own `tmp_path` while
@@ -52,8 +53,8 @@ from threading import Lock
 from app.retrieval.embeddings import embed_texts
 
 # Anchored to backend/chroma_db via __file__ so it doesn't depend on the
-# process's working directory. backend/.gitignore already ignores
-# chroma_db/.
+# process's working directory. The repo-root .gitignore already ignores
+# chroma_db/ at any depth.
 _DEFAULT_PERSIST_DIR = Path(__file__).resolve().parents[2] / "chroma_db"
 
 COLLECTION_NAME = "knowledge_base"

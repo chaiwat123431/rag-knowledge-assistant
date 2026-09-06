@@ -116,11 +116,12 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
 
 
 def _warn_on_truncation(model, texts: list[str]) -> None:
-    """Log a WARNING for any text that will be truncated by `model.encode`.
+    """Log a WARNING for any text that `model.encode` will truncate.
 
     `encode` truncates silently; this makes the loss visible without
-    changing behaviour. Skipped entirely when WARNING isn't enabled, so
-    the extra tokenisation pass costs nothing in the common case.
+    changing behaviour. The whole batch is tokenised in one call (the same
+    work `encode` does internally, once), and the check is skipped when
+    WARNING is disabled.
     """
     if not logger.isEnabledFor(logging.WARNING):
         return
@@ -129,16 +130,14 @@ def _warn_on_truncation(model, texts: list[str]) -> None:
     if not max_tokens:
         return
 
-    for i, text in enumerate(texts):
-        token_count = len(
-            model.tokenizer(text, truncation=False)["input_ids"]
-        )
-        if token_count > max_tokens:
+    token_ids_per_text = model.tokenizer(texts, truncation=False)["input_ids"]
+    for i, token_ids in enumerate(token_ids_per_text):
+        if len(token_ids) > max_tokens:
             logger.warning(
                 "texts[%d] is %d tokens, over the %s %d-token limit; "
                 "it will be truncated and its tail won't affect the embedding",
                 i,
-                token_count,
+                len(token_ids),
                 MODEL_NAME,
                 max_tokens,
             )

@@ -1,3 +1,7 @@
+import subprocess
+import sys
+from pathlib import Path
+
 import pytest
 
 import app.retrieval.vector_store as vector_store_module
@@ -94,16 +98,29 @@ def test_re_adding_a_source_replaces_its_chunks_including_a_shorter_version(
 
 
 @pytest.mark.model
-def test_data_persists_across_client_reinitialisation(tmp_path):
+def test_data_persists_to_disk_across_a_fresh_process(tmp_path):
     VectorStore(tmp_path).add_documents(CHUNKS, source="notes.md")
 
-    # Drop the cached client so the next VectorStore reopens from disk,
-    # simulating a process restart.
-    vector_store_module._collections.clear()
+    # Query from a brand-new interpreter: chromadb caches its client per
+    # path *within* a process, so re-opening in-process would read the same
+    # live in-memory index and pass even if on-disk persistence were
+    # broken. A subprocess is the only faithful "survives a restart" check.
+    backend_dir = Path(__file__).resolve().parents[1]
+    script = (
+        "from app.retrieval.vector_store import VectorStore\n"
+        f"r = VectorStore({str(tmp_path)!r}).query('logarithmic time lookups', top_k=1)\n"
+        "print(r[0]['text'])\n"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=backend_dir,
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
 
-    results = VectorStore(tmp_path).query("logarithmic time lookups", top_k=1)
-
-    assert results[0]["text"] == CHUNKS[4]  # the binary search tree chunk
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == CHUNKS[4]  # the binary search tree chunk
 
 
 @pytest.mark.parametrize("bad_question", ["", "   ", "\n\t"])
