@@ -29,14 +29,18 @@ that actually has something to embed:
 Sequence length
 ---------------
 `all-MiniLM-L6-v2` has a max input of 256 word-piece tokens. `encode()`
-*silently truncates* anything longer — no error, no warning — so text past
-that point simply doesn't influence the vector. Keeping inputs under the
-limit is the caller's responsibility; in this project that's the chunker's
-job (its ~500-character chunks sit well under 256 tokens). Passing a whole
-document straight to `embed_texts` would embed only its opening.
+*silently truncates* anything longer, so text past that point doesn't
+influence the vector — a ~500-character chunk of CJK text or whitespace-
+free content can tokenize well past 256. Keeping inputs under the limit is
+really the chunker's job, but `embed_texts` logs a WARNING (per offending
+index) when it sees an over-limit input, so a truncated embedding isn't
+completely invisible.
 """
 
+import logging
 from threading import Lock
+
+logger = logging.getLogger(__name__)
 
 MODEL_NAME = "all-MiniLM-L6-v2"
 EMBEDDING_DIM = 384  # fixed by the model architecture; asserted by the tests
@@ -76,8 +80,9 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
     Returns:
         One vector (list of floats, length `EMBEDDING_DIM`) per input
         string, in the same order as `texts`. Inputs longer than the
-        model's 256-token limit are silently truncated before embedding
-        (see "Sequence length" in the module docstring).
+        model's 256-token limit are truncated before embedding, with a
+        WARNING logged per offending index (see "Sequence length" in the
+        module docstring).
 
     Raises:
         TypeError: if `texts` is not a list, or any element is not a str.
@@ -105,5 +110,35 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
             )
 
     model = _get_model()
+    _warn_on_truncation(model, texts)
     embeddings = model.encode(texts)
     return embeddings.tolist()
+
+
+def _warn_on_truncation(model, texts: list[str]) -> None:
+    """Log a WARNING for any text that will be truncated by `model.encode`.
+
+    `encode` truncates silently; this makes the loss visible without
+    changing behaviour. Skipped entirely when WARNING isn't enabled, so
+    the extra tokenisation pass costs nothing in the common case.
+    """
+    if not logger.isEnabledFor(logging.WARNING):
+        return
+
+    max_tokens = model.max_seq_length
+    if not max_tokens:
+        return
+
+    for i, text in enumerate(texts):
+        token_count = len(
+            model.tokenizer(text, truncation=False)["input_ids"]
+        )
+        if token_count > max_tokens:
+            logger.warning(
+                "texts[%d] is %d tokens, over the %s %d-token limit; "
+                "it will be truncated and its tail won't affect the embedding",
+                i,
+                token_count,
+                MODEL_NAME,
+                max_tokens,
+            )

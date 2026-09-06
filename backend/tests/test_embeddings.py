@@ -68,6 +68,19 @@ def test_semantically_similar_texts_are_closer_than_dissimilar_ones():
     assert similar - dissimilar > 0.05
 
 
+@pytest.mark.model
+def test_embed_logs_warning_when_input_exceeds_model_token_limit(caplog):
+    long_text = "word " * 400  # ~400 tokens, well over the 256-token limit
+
+    with caplog.at_level("WARNING", logger="app.retrieval.embeddings"):
+        result = embed_texts(["a short one", long_text])
+
+    assert len(result) == 2  # still returns a vector, just a truncated one
+    warnings = [r.message for r in caplog.records if r.levelname == "WARNING"]
+    assert any("texts[1]" in m and "truncated" in m for m in warnings)
+    assert not any("texts[0]" in m for m in warnings)
+
+
 def test_embed_rejects_non_list_input():
     # A bare string is iterable, so without the explicit list check it
     # would be silently embedded character by character.
