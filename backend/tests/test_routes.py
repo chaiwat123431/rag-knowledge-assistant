@@ -3,7 +3,11 @@ from fastapi.testclient import TestClient
 
 from app.api.routes import get_llm, get_vector_store
 from app.main import app
-from app.retrieval.llm import OllamaTimeoutError, OllamaUnavailableError
+from app.retrieval.llm import (
+    OllamaModelNotFoundError,
+    OllamaTimeoutError,
+    OllamaUnavailableError,
+)
 from app.retrieval.query_flow import NO_CONTEXT_ANSWER
 
 
@@ -172,6 +176,25 @@ def test_query_llm_timeout_returns_503(client):
     response = c.post("/query", json={"question": "a real question"})
 
     assert response.status_code == 503
+
+
+def test_query_llm_model_not_found_returns_500(client):
+    # Non-retryable misconfiguration (model not pulled) — distinct from the
+    # transient 503s above.
+    store = FakeStore([_result("relevant text", "d.md", 0, 0.9)])
+
+    def missing_model(prompt, model="stub"):
+        raise OllamaModelNotFoundError(
+            "Ollama model 'llama3.2' is not available. "
+            "Pull it with `ollama pull llama3.2`."
+        )
+
+    c = client(store, generate=missing_model)
+
+    response = c.post("/query", json={"question": "a real question"})
+
+    assert response.status_code == 500
+    assert "ollama pull" in response.json()["detail"].lower()
 
 
 # --- /documents ---------------------------------------------------------

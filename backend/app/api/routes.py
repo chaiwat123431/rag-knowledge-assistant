@@ -3,8 +3,15 @@
 Thin layer over the retrieval modules — parse/chunk/store for ingestion,
 `answer_with_llm` for queries. All the real work lives in `app.ingestion`
 and `app.retrieval`; this module maps it to HTTP and turns the *known*
-domain errors into deliberate status codes: 400 for bad input, 503 when a
-backend (the LLM, or the embedding model on first ingest) is unavailable.
+domain errors into deliberate status codes:
+
+- 400 for bad input (empty question, unreadable/unsupported/empty file)
+- 503 when a backend is *transiently* unavailable — Ollama not running or
+  timing out, or the embedding model can't be fetched on first ingest;
+  retrying later may succeed
+- 500 for a non-retryable backend misconfiguration — Ollama is up but the
+  requested model was never pulled; a human has to run `ollama pull`
+
 Genuinely unexpected failures still surface as 500 — that's correct.
 
 Dependencies
@@ -37,7 +44,11 @@ from app.ingestion.parser import (
     SUPPORTED_TEXT_EXTENSIONS,
     extract_text,
 )
-from app.retrieval.llm import LLMError, generate_answer
+from app.retrieval.llm import (
+    LLMError,
+    OllamaModelNotFoundError,
+    generate_answer,
+)
 from app.retrieval.query_flow import answer_with_llm
 from app.retrieval.vector_store import VectorStore
 
@@ -94,6 +105,7 @@ class IngestResponse(BaseModel):
     response_model=QueryResponse,
     responses={
         400: {"description": "Empty question"},
+        500: {"description": "LLM misconfigured (model not pulled)"},
         503: {"description": "LLM backend unavailable / timed out"},
     },
 )
@@ -112,9 +124,13 @@ def query(
         result = answer_with_llm(
             request.question, store, top_k=request.top_k, generate=generate
         )
+    except OllamaModelNotFoundError as exc:
+        # Ollama is up but the model was never pulled — not transient,
+        # retrying won't help; an operator must fix it.
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
     except LLMError as exc:
-        # Ollama down / timed out / model missing — a backend problem,
-        # not a client error.
+        # Ollama unreachable or timed out — a transient backend problem,
+        # not a client error; retrying later may work.
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     return QueryResponse(
