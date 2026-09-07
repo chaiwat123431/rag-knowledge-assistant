@@ -53,7 +53,8 @@ rag-assistant/
 │   │   │   └── chunker.py       # text splitting logic [done]
 │   │   ├── retrieval/
 │   │   │   ├── embeddings.py    # embedding generation [done]
-│   │   │   └── vector_store.py  # Chroma interface [done]
+│   │   │   ├── vector_store.py  # Chroma interface [done]
+│   │   │   └── query_flow.py    # retrieve -> prompt + citations [done]
 │   │   └── api/
 │   │       └── routes.py        # HTTP endpoints
 │   ├── tests/
@@ -79,6 +80,11 @@ rag-assistant/
   - Model- and Chroma-loading tests marked `@pytest.mark.model` (deselect offline with `-m "not model"`)
 - [ ] Query flow (question -> retrieve -> prompt -> answer with citations)
   - LLM: Ollama locally for dev, Gemini Flash (free tier) for prod/deploy
+  - [x] Prompt + citation assembly (`query_flow.py` + tests) — `feature/query-flow`, PR #4
+    - `answer_question(question, vector_store, top_k=5)` -> dict with `prompt` (numbered `[n]` source markers), `has_context`, `citations`
+    - relevance floor (`MIN_RELEVANCE_SCORE`) drops off-topic chunks so an unrelated question falls back to a "no context" prompt
+    - no LLM call yet — Ollama/Gemini wiring is the next slice
+  - [ ] Actual LLM call (Ollama dev / Gemini prod)
 - [ ] Conversational follow-up memory
 - [ ] Frontend (Phase 3)
 
