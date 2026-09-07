@@ -82,7 +82,7 @@ def test_connection_refused_raises_ollama_unavailable(monkeypatch):
     assert "ollama serve" in str(excinfo.value).lower()
 
 
-def test_timeout_raises_ollama_timeout(monkeypatch):
+def test_read_timeout_raises_ollama_timeout(monkeypatch):
     def handler(*a, **k):
         raise httpx.ReadTimeout("timed out")
 
@@ -90,6 +90,57 @@ def test_timeout_raises_ollama_timeout(monkeypatch):
 
     with pytest.raises(OllamaTimeoutError):
         generate_answer("hi", timeout=1.0)
+
+
+def test_connect_timeout_is_unavailable_not_timeout(monkeypatch):
+    # ConnectTimeout subclasses both TimeoutException and ConnectError; a
+    # server we can't even connect to should fail fast as "unavailable".
+    def handler(*a, **k):
+        raise httpx.ConnectTimeout("connect timed out")
+
+    _patch_post(monkeypatch, handler)
+
+    with pytest.raises(OllamaUnavailableError):
+        generate_answer("hi")
+
+
+@pytest.mark.parametrize("bad_prompt", [None, 123, ["list"], {"d": 1}])
+def test_non_string_prompt_raises_value_error(bad_prompt, monkeypatch):
+    _patch_post(
+        monkeypatch,
+        lambda *a, **k: pytest.fail("httpx.post should not be called"),
+    )
+
+    with pytest.raises(ValueError):
+        generate_answer(bad_prompt)
+
+
+def test_trailing_slash_in_base_url_is_normalised(monkeypatch):
+    seen = {}
+
+    def handler(url, json, timeout):
+        seen["url"] = url
+        return httpx.Response(200, json={"response": "ok"})
+
+    _patch_post(monkeypatch, handler)
+
+    generate_answer("hi", base_url="http://localhost:11434/")
+
+    assert seen["url"] == "http://localhost:11434/api/generate"
+
+
+def test_404_not_about_a_model_raises_generic_llm_error(monkeypatch):
+    # e.g. a wrong base_url path — must not be reported as "pull the model".
+    def handler(url, json, timeout):
+        return httpx.Response(404, json={"error": "404 page not found"})
+
+    _patch_post(monkeypatch, handler)
+
+    with pytest.raises(LLMError) as excinfo:
+        generate_answer("hi")
+
+    assert not isinstance(excinfo.value, OllamaModelNotFoundError)
+    assert "base_url" in str(excinfo.value)
 
 
 def test_missing_model_raises_model_not_found(monkeypatch):

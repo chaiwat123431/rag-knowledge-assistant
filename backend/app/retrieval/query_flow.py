@@ -196,10 +196,13 @@ def answer_with_llm(
     Args:
         question, vector_store, top_k, min_score: passed to
             `answer_question`.
-        generate: callable ``(prompt, *, model) -> str`` used to produce
-            the answer. Defaults to `app.retrieval.llm.generate_answer`;
-            override it in tests, or to point at a different backend
-            (e.g. Gemini in production).
+        generate: callable ``(prompt, model=...) -> str`` used to produce
+            the answer. Defaults to `app.retrieval.llm.generate_answer`.
+            This is the single seam for configuring or replacing the LLM:
+            for a non-default Ollama host/timeout, pass
+            ``functools.partial(generate_answer, base_url=..., timeout=...)``;
+            for a different backend (e.g. Gemini in production) or in tests,
+            pass any callable with the same shape.
         model: model name forwarded to `generate`.
 
     Returns:

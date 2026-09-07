@@ -48,23 +48,25 @@ def generate_answer(
     Args:
         prompt: the full prompt to generate from.
         model: Ollama model name (must already be pulled).
-        base_url: Ollama server base URL.
+        base_url: Ollama server base URL. A trailing slash is tolerated.
         timeout: read timeout in seconds (connect is fixed short at 5s).
 
     Returns:
         The model's response text, stripped.
 
     Raises:
-        ValueError: if `prompt` is empty or whitespace-only.
-        OllamaUnavailableError: the server couldn't be reached.
-        OllamaTimeoutError: the server didn't respond within `timeout`.
+        ValueError: if `prompt` is not a non-empty string.
+        OllamaUnavailableError: the server couldn't be reached (including a
+            connect timeout — a down server should fail fast).
+        OllamaTimeoutError: the connection was made but no response came
+            within `timeout` (e.g. the model is still loading).
         OllamaModelNotFoundError: `model` isn't available on the server.
         LLMError: any other non-success response.
     """
-    if not prompt or not prompt.strip():
+    if not isinstance(prompt, str) or not prompt.strip():
         raise ValueError("prompt must be a non-empty string")
 
-    url = f"{base_url}/api/generate"
+    url = f"{base_url.rstrip('/')}/api/generate"
     payload = {"model": model, "prompt": prompt, "stream": False}
 
     try:
@@ -73,7 +75,18 @@ def generate_answer(
             json=payload,
             timeout=httpx.Timeout(timeout, connect=5.0),
         )
+    except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+        # Can't establish a connection at all (refused, or no SYN-ACK
+        # within the 5s connect deadline) — the server is unreachable,
+        # not merely slow. ConnectTimeout is a TimeoutException, so it
+        # must be caught before the generic timeout branch below.
+        raise OllamaUnavailableError(
+            f"Could not reach Ollama at {base_url} ({exc!s}). Is it running? "
+            f"Start it with `ollama serve`."
+        ) from exc
     except httpx.TimeoutException as exc:
+        # Connected, but no response in time (read/write/pool timeout) —
+        # e.g. the model is still loading.
         raise OllamaTimeoutError(
             f"Ollama at {base_url} did not respond within {timeout}s "
             f"(model {model!r}). It may still be loading the model — retry, "
@@ -86,9 +99,15 @@ def generate_answer(
         ) from exc
 
     if response.status_code == 404:
-        raise OllamaModelNotFoundError(
-            f"Ollama model {model!r} is not available ({_error_detail(response)}). "
-            f"Pull it with `ollama pull {model}`."
+        detail = _error_detail(response)
+        if "model" in detail.lower():
+            raise OllamaModelNotFoundError(
+                f"Ollama model {model!r} is not available ({detail}). "
+                f"Pull it with `ollama pull {model}`."
+            )
+        # 404 that isn't about the model — most likely a wrong base_url.
+        raise LLMError(
+            f"Ollama returned HTTP 404 for {url} ({detail}). Check base_url."
         )
     if response.status_code >= 400:
         raise LLMError(

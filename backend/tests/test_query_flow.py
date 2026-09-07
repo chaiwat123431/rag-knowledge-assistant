@@ -330,7 +330,9 @@ def test_answer_with_llm_uses_real_generate_answer_by_default():
     assert qf.generate_answer is llm.generate_answer
 
 
-@pytest.mark.ollama
+# `model` only, not `ollama`: this needs the embeddings model download too,
+# so it doesn't belong in the fast HTTP-only `-m ollama` run. Under
+# `-m model` it skips cleanly when Ollama isn't up.
 @pytest.mark.model
 def test_full_pipeline_end_to_end_real_ollama(tmp_path):
     import httpx
