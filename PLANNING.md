@@ -58,7 +58,7 @@ rag-assistant/
 │   │   │   ├── query_flow.py    # retrieve -> prompt -> answer + citations [done]
 │   │   │   └── llm.py           # Ollama HTTP client [done]
 │   │   └── api/
-│   │       └── routes.py        # HTTP endpoints
+│   │       └── routes.py        # HTTP endpoints (/query, /documents)
 │   ├── tests/
 │   ├── requirements.txt
 │   └── .env.example
@@ -89,6 +89,11 @@ rag-assistant/
     - `llm.generate_answer(prompt, model="llama3.2")` -> Ollama HTTP (`localhost:11434`), typed errors (unavailable / timeout / model-not-found)
     - `query_flow.answer_with_llm(...)` = retrieve -> prompt -> generate -> `{answer, citations, ...}`; `generate` injectable (Gemini swap-in for prod)
     - `httpx` (not `requests`): FastAPI-native, async-ready; new `@pytest.mark.ollama` marker for tests hitting a real local Ollama (skip if absent)
+- [x] API routes (`api/routes.py` + tests) — `feature/api-routes`, PR #6
+  - Reordered ahead of conversational memory: we need a callable endpoint (curl/Postman, later the frontend) before iterating on conversation state — the API shape makes it clearer where that state should live.
+  - `POST /query` `{question, top_k?}` -> `{answer, has_context, citations}`; `POST /documents` (file upload) -> parse/chunk/`add_documents`
+  - error mapping: empty question -> 400, out-of-range `top_k` -> 422, unsupported/unreadable/empty file -> 400, Ollama down/timeout & indexing-backend failure -> 503 (transient), `OllamaModelNotFoundError` -> 500 (non-retryable misconfig)
+  - `VectorStore` + LLM callable injected via `lru_cache`d FastAPI dependencies, overridable in tests (`app.dependency_overrides`)
 - [ ] Conversational follow-up memory
 - [ ] Frontend (Phase 3)
 

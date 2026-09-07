@@ -1,13 +1,12 @@
-"""FastAPI entrypoint.
-
-Kept minimal for now: just app creation + a health check so we can verify
-the server boots and is reachable. Ingestion/retrieval routes will be wired
-in via app/api/routes.py once those modules exist (see PLANNING.md).
-"""
+"""FastAPI entrypoint: app creation, health check, and route wiring."""
 
 from fastapi import FastAPI
 
+from app.api.routes import router
+
 app = FastAPI(title="RAG Assistant")
+
+app.include_router(router)
 
 
 @app.get("/health")
