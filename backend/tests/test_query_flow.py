@@ -1,6 +1,10 @@
 import pytest
 
-from app.retrieval.query_flow import answer_question, build_prompt
+from app.retrieval.query_flow import (
+    MIN_RELEVANCE_SCORE,
+    answer_question,
+    build_prompt,
+)
 from app.retrieval.vector_store import VectorStore
 
 
@@ -74,6 +78,84 @@ def test_prompt_and_citations_when_relevant_chunks_exist():
     assert [c["chunk_index"] for c in citations] == [2, 0, 5]
     assert citations[0]["text"] == FIVE_RESULTS[0]["text"]
     assert citations[0]["score"] == pytest.approx(0.81)
+
+
+def test_all_results_below_relevance_floor_are_treated_as_no_context():
+    # Non-empty store, but the question is unrelated to everything in it:
+    # Chroma still returns nearest chunks, just with low scores.
+    low = [
+        _result("The Bastille was stormed in 1789.", "history.md", 5, 0.07),
+        _result("Compound interest compounds over time.", "finance.md", 1, 0.04),
+    ]
+    store = FakeVectorStore(low)
+
+    result = answer_question("How does photosynthesis work?", store)
+
+    assert result["has_context"] is False
+    assert result["citations"] == []
+    assert "Context:" not in result["prompt"]
+    assert "don't have information" in result["prompt"].lower()
+    # the unrelated sources must NOT appear anywhere
+    assert "history.md" not in result["prompt"]
+    assert "finance.md" not in result["prompt"]
+
+
+def test_only_results_above_the_floor_are_kept_and_renumbered():
+    mixed = [
+        _result("Mitochondria produce ATP.", "biology.md", 2, 0.80),
+        _result("Totally unrelated aside.", "misc.md", 9, 0.05),
+        _result("Cells respire to release energy.", "biology.md", 7, 0.42),
+    ]
+    store = FakeVectorStore(mixed)
+
+    result = answer_question("How do cells make energy?", store)
+
+    assert result["has_context"] is True
+    assert [c["marker"] for c in result["citations"]] == [1, 2]
+    assert [c["chunk_index"] for c in result["citations"]] == [2, 7]
+    assert "misc.md" not in result["prompt"]
+    assert "Totally unrelated aside." not in result["prompt"]
+    assert "[1] (source: biology.md, chunk 2)" in result["prompt"]
+    assert "[2] (source: biology.md, chunk 7)" in result["prompt"]
+
+
+def test_min_score_can_be_overridden():
+    store = FakeVectorStore(FIVE_RESULTS)  # scores 0.81 .. 0.18
+
+    result = answer_question("q", store, min_score=0.5)
+
+    # only 0.81 and 0.74 clear a 0.5 floor
+    assert [c["source"] for c in result["citations"]] == ["biology.md", "biology.md"]
+    assert [c["chunk_index"] for c in result["citations"]] == [2, 0]
+
+
+def test_default_floor_matches_the_module_constant():
+    # scores straddling MIN_RELEVANCE_SCORE
+    straddle = [
+        _result("keep me", "a.md", 0, MIN_RELEVANCE_SCORE),
+        _result("drop me", "b.md", 0, MIN_RELEVANCE_SCORE - 0.01),
+    ]
+    store = FakeVectorStore(straddle)
+
+    result = answer_question("q", store)
+
+    assert [c["text"] for c in result["citations"]] == ["keep me"]
+
+
+def test_missing_source_renders_as_unknown_in_prompt_and_citation():
+    result_dict = {
+        "id": "x::0",
+        "text": "orphan chunk",
+        "source": None,
+        "chunk_index": 0,
+        "score": 0.9,
+    }
+    store = FakeVectorStore([result_dict])
+
+    result = answer_question("q", store)
+
+    assert "[1] (source: unknown, chunk 0)" in result["prompt"]
+    assert result["citations"][0]["source"] == "unknown"
 
 
 def test_empty_store_returns_clear_no_context_result_without_error():
