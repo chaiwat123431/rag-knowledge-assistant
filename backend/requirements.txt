@@ -3,6 +3,7 @@ uvicorn
 langchain
 chromadb
 sentence-transformers
+httpx
 pypdf
 python-dotenv
 pytest

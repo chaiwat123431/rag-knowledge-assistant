@@ -2,7 +2,9 @@ import pytest
 
 from app.retrieval.query_flow import (
     MIN_RELEVANCE_SCORE,
+    NO_CONTEXT_ANSWER,
     answer_question,
+    answer_with_llm,
     build_prompt,
 )
 from app.retrieval.vector_store import VectorStore
@@ -249,3 +251,111 @@ def test_citation_markers_match_prompt_markers():
         # citation's own text
         block_header = f"[{marker}] (source: {citation['source']}"
         assert block_header in result["prompt"]
+
+
+# --- answer_with_llm: the full pipeline, with an injected fake LLM --------
+
+
+def test_answer_with_llm_calls_generate_with_the_built_prompt():
+    store = FakeVectorStore(FIVE_RESULTS)
+    seen = {}
+
+    def generate(prompt, model="fake"):
+        seen["prompt"] = prompt
+        seen["model"] = model
+        return "Cells make energy in the mitochondria [1]."
+
+    result = answer_with_llm(
+        "How do cells make energy?", store, top_k=2,
+        generate=generate, model="llama3.2",
+    )
+
+    assert result["answer"] == "Cells make energy in the mitochondria [1]."
+    assert result["has_context"] is True
+    assert seen["model"] == "llama3.2"
+    # the prompt handed to the LLM is the one answer_question built
+    assert "How do cells make energy?" in seen["prompt"]
+    assert FIVE_RESULTS[0]["text"] in seen["prompt"]
+    # citations carried through, matching the [n] markers in that prompt
+    assert [c["marker"] for c in result["citations"]] == [1, 2]
+    assert result["prompt"] == seen["prompt"]
+
+
+def test_answer_with_llm_short_circuits_when_no_context():
+    store = FakeVectorStore([])
+    called = False
+
+    def generate(prompt, model="fake"):
+        nonlocal called
+        called = True
+        return "should not happen"
+
+    result = answer_with_llm("unrelated question", store, generate=generate)
+
+    assert called is False
+    assert result["answer"] == NO_CONTEXT_ANSWER
+    assert result["has_context"] is False
+    assert result["citations"] == []
+
+
+def test_answer_with_llm_short_circuits_when_all_below_floor():
+    low = [_result("off topic", "x.md", 0, 0.02)]
+    store = FakeVectorStore(low)
+
+    result = answer_with_llm(
+        "q", store, generate=lambda *a, **k: pytest.fail("LLM called")
+    )
+
+    assert result["answer"] == NO_CONTEXT_ANSWER
+    assert result["has_context"] is False
+
+
+def test_answer_with_llm_propagates_generate_errors():
+    store = FakeVectorStore(FIVE_RESULTS)
+
+    def generate(prompt, model="fake"):
+        raise RuntimeError("ollama exploded")
+
+    with pytest.raises(RuntimeError, match="ollama exploded"):
+        answer_with_llm("q", store, generate=generate)
+
+
+def test_answer_with_llm_uses_real_generate_answer_by_default():
+    # Not calling it — just checking the default wiring points at the llm
+    # module, so a missing `generate` arg would hit Ollama, not a stub.
+    from app.retrieval import llm
+
+    import app.retrieval.query_flow as qf
+
+    assert qf.generate_answer is llm.generate_answer
+
+
+@pytest.mark.ollama
+@pytest.mark.model
+def test_full_pipeline_end_to_end_real_ollama(tmp_path):
+    import httpx
+
+    try:
+        httpx.get("http://localhost:11434/api/tags", timeout=5).raise_for_status()
+    except Exception:
+        pytest.skip("Ollama not reachable on localhost:11434")
+
+    store = VectorStore(tmp_path)
+    store.add_documents(
+        [
+            "Aurelia's Cafe on Pine Street opens at 7am on weekdays.",
+            "The public library is closed on Mondays.",
+        ],
+        source="notes.md",
+    )
+
+    result = answer_with_llm(
+        "What time does Aurelia's Cafe open on weekdays?",
+        store,
+        top_k=2,
+        model="llama3.2",
+    )
+
+    assert result["has_context"] is True
+    assert result["citations"][0]["source"] == "notes.md"
+    assert "7" in result["answer"] or "seven" in result["answer"].lower()

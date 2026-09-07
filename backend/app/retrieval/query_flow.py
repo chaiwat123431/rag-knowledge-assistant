@@ -1,9 +1,14 @@
-"""Query flow — retrieved chunks in, LLM-ready prompt + citations out.
+"""Query flow — question in, grounded answer + citations out.
 
-This is the "Build prompt with retrieved context" step of PLANNING.md's
-query data flow. It deliberately stops short of calling an LLM: the actual
-Ollama/Gemini call is a separate task, gated on confirming the prompt and
-citation structure here are right.
+Two entry points:
+
+- `answer_question(...)` runs retrieval and assembles an LLM-ready prompt
+  + citation list, but does NOT call an LLM. It stays hermetic and fast,
+  and is the base the tests exercise.
+- `answer_with_llm(...)` is the full pipeline: it calls `answer_question`,
+  then sends the prompt to an LLM (`app.retrieval.llm.generate_answer` by
+  default, injectable) and returns the answer text alongside the
+  citations. No context found -> a canned answer, no LLM round-trip.
 
 Prompt shape
 ------------
@@ -35,12 +40,19 @@ The floor is a heuristic; revisit it once retrieval quality is actually
 measured (same caveat as the chunker's char-based sizing).
 """
 
+from app.retrieval.llm import DEFAULT_MODEL, generate_answer
 from app.retrieval.vector_store import VectorStore
 
 # Cosine similarity below this is treated as "not really about this".
 # MiniLM puts genuinely unrelated short passages well under 0.15;
 # related-but-different material sits above it.
 MIN_RELEVANCE_SCORE = 0.15
+
+# Returned as the answer when retrieval found nothing relevant — no point
+# spending an LLM round-trip to have it say the same thing.
+NO_CONTEXT_ANSWER = (
+    "I don't have information about that in your documents."
+)
 
 _INSTRUCTIONS = (
     "You are a helpful assistant answering questions about the user's "
@@ -167,4 +179,57 @@ def answer_question(
             _to_citation(marker, result)
             for marker, result in enumerate(relevant, start=1)
         ],
+    }
+
+
+def answer_with_llm(
+    question: str,
+    vector_store: VectorStore,
+    top_k: int = 5,
+    min_score: float = MIN_RELEVANCE_SCORE,
+    *,
+    generate=generate_answer,
+    model: str = DEFAULT_MODEL,
+) -> dict:
+    """Full pipeline: retrieve, build prompt, generate a grounded answer.
+
+    Args:
+        question, vector_store, top_k, min_score: passed to
+            `answer_question`.
+        generate: callable ``(prompt, *, model) -> str`` used to produce
+            the answer. Defaults to `app.retrieval.llm.generate_answer`;
+            override it in tests, or to point at a different backend
+            (e.g. Gemini in production).
+        model: model name forwarded to `generate`.
+
+    Returns:
+        A dict:
+          - ``question`` (str)
+          - ``answer`` (str): the generated answer, or `NO_CONTEXT_ANSWER`
+            when nothing relevant was retrieved (no `generate` call made).
+          - ``citations`` (list[dict]): same as `answer_question`.
+          - ``has_context`` (bool)
+          - ``prompt`` (str): the prompt that was (or would have been) sent,
+            kept for observability/debugging.
+
+    Raises:
+        ValueError: propagated from `answer_question`.
+        LLMError (and subclasses): propagated from `generate` when context
+            was found and the call failed.
+    """
+    retrieval = answer_question(
+        question, vector_store, top_k=top_k, min_score=min_score
+    )
+
+    if retrieval["has_context"]:
+        answer = generate(retrieval["prompt"], model=model)
+    else:
+        answer = NO_CONTEXT_ANSWER
+
+    return {
+        "question": question,
+        "answer": answer,
+        "citations": retrieval["citations"],
+        "has_context": retrieval["has_context"],
+        "prompt": retrieval["prompt"],
     }
