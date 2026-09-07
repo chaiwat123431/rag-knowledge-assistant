@@ -28,6 +28,7 @@ files.
 | Embeddings | `sentence-transformers` (local, e.g. `all-MiniLM-L6-v2`) | Runs locally, no API cost or key, good baseline quality for a single-user portfolio project. Was OpenAI `text-embedding-3-small`; switched to avoid paid API dependency. |
 | LLM (dev) | Ollama (local) | Free local inference during development; no rate limits or keys while iterating |
 | LLM (prod) | Google Gemini API — Flash model (free tier) | Free tier covers portfolio-scale usage; no local GPU needed on the deployment host. Replaces the earlier implicit OpenAI assumption. |
+| LLM call — direct HTTP, not LangChain | `llm.generate_answer()` calls Ollama's `/api/generate` with `httpx` directly | One narrow function is easier to reason about and test than a LangChain LLM wrapper for a single call; `answer_with_llm` takes an injectable `generate` callable so the Gemini prod backend is a drop-in. `httpx` over `requests`: FastAPI-native, async-ready, constructible `Response` for deterministic test mocking. |
 | Chunking | Recursive character splitter, ~500 tokens, 50 token overlap | Balances context completeness vs. retrieval precision. **Implemented as a custom word-boundary splitter instead** (character-based, no token count), not LangChain's `RecursiveCharacterTextSplitter` — revisit if paragraph/sentence-aware splitting turns out to matter once retrieval quality is measured. |
 | Frontend | Next.js + TypeScript | Separate phase; not part of Phase 1 |
 
@@ -54,7 +55,8 @@ rag-assistant/
 │   │   ├── retrieval/
 │   │   │   ├── embeddings.py    # embedding generation [done]
 │   │   │   ├── vector_store.py  # Chroma interface [done]
-│   │   │   └── query_flow.py    # retrieve -> prompt + citations [done]
+│   │   │   ├── query_flow.py    # retrieve -> prompt -> answer + citations [done]
+│   │   │   └── llm.py           # Ollama HTTP client [done]
 │   │   └── api/
 │   │       └── routes.py        # HTTP endpoints
 │   ├── tests/
@@ -78,13 +80,15 @@ rag-assistant/
   - Embeddings via local `sentence-transformers` (`all-MiniLM-L6-v2`) instead of the OpenAI API (see Architecture Decisions)
   - `VectorStore`: persistent Chroma collection (cosine), `add_documents(chunks, source)` / `query(question, top_k)` returning chunks with `source`/`chunk_index` metadata + similarity score
   - Model- and Chroma-loading tests marked `@pytest.mark.model` (deselect offline with `-m "not model"`)
-- [ ] Query flow (question -> retrieve -> prompt -> answer with citations)
+- [x] Query flow (question -> retrieve -> prompt -> answer with citations) — `feature/query-flow` + `feature/llm-integration`
   - LLM: Ollama locally for dev, Gemini Flash (free tier) for prod/deploy
   - [x] Prompt + citation assembly (`query_flow.py` + tests) — `feature/query-flow`, PR #4
     - `answer_question(question, vector_store, top_k=5)` -> dict with `prompt` (numbered `[n]` source markers), `has_context`, `citations`
     - relevance floor (`MIN_RELEVANCE_SCORE`) drops off-topic chunks so an unrelated question falls back to a "no context" prompt
-    - no LLM call yet — Ollama/Gemini wiring is the next slice
-  - [ ] Actual LLM call (Ollama dev / Gemini prod)
+  - [x] LLM call (`llm.py` + `answer_with_llm` + tests) — `feature/llm-integration`, PR #5
+    - `llm.generate_answer(prompt, model="llama3.2")` -> Ollama HTTP (`localhost:11434`), typed errors (unavailable / timeout / model-not-found)
+    - `query_flow.answer_with_llm(...)` = retrieve -> prompt -> generate -> `{answer, citations, ...}`; `generate` injectable (Gemini swap-in for prod)
+    - `httpx` (not `requests`): FastAPI-native, async-ready; new `@pytest.mark.ollama` marker for tests hitting a real local Ollama (skip if absent)
 - [ ] Conversational follow-up memory
 - [ ] Frontend (Phase 3)
 
