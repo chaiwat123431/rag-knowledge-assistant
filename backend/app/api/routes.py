@@ -74,11 +74,13 @@ def get_llm() -> Callable[..., str]:
 
 
 class HistoryMessage(BaseModel):
-    # role is a plain str (not Literal) on purpose: an invalid role should
-    # be a 400 from our own history validation, not a 422, per the API's
-    # "malformed history -> 400" contract.
-    role: str
-    content: str
+    # Both fields are optional at the schema level on purpose: a missing /
+    # null / wrongly-typed role or content should surface as our own 400
+    # (from _validate_history), not a 422, per the "malformed history ->
+    # 400" contract. Only a structurally wrong `history` (not a list of
+    # objects) is left to pydantic (422).
+    role: str | None = None
+    content: str | None = None
 
 
 class QueryRequest(BaseModel):

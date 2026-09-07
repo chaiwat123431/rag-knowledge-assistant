@@ -26,12 +26,15 @@ Only the last `MAX_HISTORY_MESSAGES` messages are kept — a follow-up
 almost always refers to the immediately preceding turn, and older turns
 just inflate the prompt.
 
-Retrieval also uses history, minimally: the embedding query is the last
-*user* message + the current question. A bare follow-up like "and the
-second part?" has no topical content of its own; without the previous
-turn the retriever finds nothing. Assistant answers are left out of the
-retrieval query (long, and carry the model's phrasing). No LLM-based
-query rewriting — the concatenation heuristic is the MVP choice.
+Retrieval also uses history. A bare follow-up like "and the second part?"
+has no topical content of its own — retrieved alone it finds nothing. So
+when there's history we retrieve *twice*: once for the current question
+as-is, and once for (last user turn + current question), then merge the
+two result sets (best score wins per chunk) and take the top `top_k`.
+That way a self-contained new question on a different topic still gets its
+own chunks, and a context-dependent follow-up still gets the subject's.
+Assistant turns are not used for retrieval (long, carry the model's own
+phrasing). No LLM-based query rewriting — this is the MVP heuristic.
 
 Prompt shape
 ------------
@@ -62,6 +65,8 @@ guarantee — you can ask for 5 and get 2 citations, or 0.
 The floor is a heuristic; revisit it once retrieval quality is actually
 measured (same caveat as the chunker's char-based sizing).
 """
+
+import re
 
 from app.retrieval.llm import DEFAULT_MODEL, generate_answer
 from app.retrieval.vector_store import VectorStore
@@ -146,25 +151,40 @@ def _validate_history(history) -> list[dict]:
     return history
 
 
-def _retrieval_query(question: str, history: list[dict]) -> str:
-    """Text to embed for retrieval.
+def _retrieval_queries(question: str, history: list[dict]) -> list[str]:
+    """The text(s) to embed for retrieval.
 
-    For a follow-up that only makes sense in context ("and the second
-    part?"), prepend the most recent *user* turn so the retriever sees the
-    subject. Assistant turns are excluded on purpose.
+    Always the current question as-is. If there's a prior *user* turn,
+    also (that turn + the question), so a context-dependent follow-up
+    ("and the second part?") still retrieves the subject. Assistant turns
+    are excluded on purpose. The caller runs each and merges the results.
     """
+    queries = [question]
     last_user = next(
         (m["content"] for m in reversed(history) if m["role"] == "user"),
         None,
     )
-    return f"{last_user}\n{question}" if last_user else question
+    if last_user:
+        queries.append(f"{last_user}\n{question}")
+    return queries
+
+
+_CITATION_MARKER_RE = re.compile(r"\s*\[\d+\]")
 
 
 def _format_history(history: list[dict]) -> str:
-    return "\n".join(
-        f"{'User' if m['role'] == 'user' else 'Assistant'}: {m['content']}"
-        for m in history
-    )
+    lines = []
+    for message in history:
+        if message["role"] == "user":
+            lines.append(f"User: {message['content']}")
+        else:
+            # Strip our own [n] citation markers from prior answers: they
+            # refer to that turn's context, not this one's, so leaving them
+            # in invites the model to reuse numbers that no longer map to
+            # anything in `citations`.
+            cleaned = _CITATION_MARKER_RE.sub("", message["content"])
+            lines.append(f"Assistant: {cleaned}")
+    return "\n".join(lines)
 
 
 def _format_context_block(marker: int, result: dict) -> str:
@@ -252,9 +272,10 @@ def answer_question(
         min_score: cosine-similarity floor; results scoring below it are
             ignored. Defaults to `MIN_RELEVANCE_SCORE`.
         history: optional prior conversation as ``{"role", "content"}``
-            messages. Used two ways: the last user turn augments the
-            retrieval query, and the last `MAX_HISTORY_MESSAGES` messages
-            go into the prompt. `None` / `[]` behaves as before.
+            messages. Used two ways: it drives a second retrieval query
+            (last user turn + question) whose results are merged in, and
+            the last `MAX_HISTORY_MESSAGES` messages go into the prompt.
+            `None` / `[]` behaves as before.
 
     Returns:
         A dict with stable keys in both the found and not-found cases:
@@ -270,13 +291,15 @@ def answer_question(
 
     Raises:
         InvalidHistoryError: if `history` is malformed.
-        ValueError: if `question` is empty/whitespace-only or `top_k` < 1
-            (raised by `vector_store.query`).
+        ValueError: if `question` is empty/whitespace-only or `top_k` < 1.
     """
+    if not question or not question.strip():
+        raise ValueError("question must be a non-empty string")
+
     trimmed = _validate_history(history)[-MAX_HISTORY_MESSAGES:]
 
-    results = vector_store.query(
-        _retrieval_query(question, trimmed), top_k=top_k
+    results = _retrieve(
+        vector_store, _retrieval_queries(question, trimmed), top_k
     )
     relevant = [r for r in results if _is_relevant(r, min_score)]
 
@@ -289,6 +312,26 @@ def answer_question(
             for marker, result in enumerate(relevant, start=1)
         ],
     }
+
+
+def _retrieve(
+    vector_store: VectorStore, queries: list[str], top_k: int
+) -> list[dict]:
+    """Run each query, merge results (best score per chunk), return top_k."""
+    if len(queries) == 1:
+        return vector_store.query(queries[0], top_k=top_k)
+
+    best: dict[str, dict] = {}
+    for query in queries:
+        for result in vector_store.query(query, top_k=top_k):
+            existing = best.get(result["id"])
+            if existing is None or result["score"] > existing["score"]:
+                best[result["id"]] = result
+
+    ranked = sorted(
+        best.values(), key=lambda r: r["score"], reverse=True
+    )
+    return ranked[:top_k]
 
 
 def answer_with_llm(

@@ -250,9 +250,12 @@ def test_query_without_history_is_unchanged(client):
 @pytest.mark.parametrize(
     "history",
     [
-        [{"role": "system", "content": "nope"}],
-        [{"role": "user", "content": ""}],
-        [{"role": "user", "content": "   "}],
+        [{"role": "system", "content": "nope"}],  # bad role value
+        [{"role": "user", "content": ""}],  # empty content
+        [{"role": "user", "content": "   "}],  # whitespace content
+        [{"role": "user"}],  # missing content
+        [{"role": "user", "content": None}],  # null content
+        [{"content": "no role"}],  # missing role
     ],
 )
 def test_query_malformed_history_returns_400(client, history):

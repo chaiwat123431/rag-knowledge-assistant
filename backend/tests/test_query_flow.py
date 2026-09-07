@@ -15,20 +15,30 @@ from app.retrieval.vector_store import VectorStore
 class FakeVectorStore:
     """Stands in for VectorStore so these tests exercise prompt/citation
     assembly in isolation, without loading the embedding model or Chroma
-    (retrieval itself is covered by test_vector_store.py)."""
+    (retrieval itself is covered by test_vector_store.py).
 
-    def __init__(self, results: list[dict]):
+    `results` may be a flat list (returned for any query) or a dict mapping
+    an exact query string to its result list (for testing dual retrieval).
+    """
+
+    def __init__(self, results):
         self._results = results
-        self.received_question = None
+        self.received_queries: list[str] = []
         self.received_top_k = None
+
+    @property
+    def received_question(self):  # back-compat for older tests
+        return self.received_queries[-1] if self.received_queries else None
 
     def query(self, question: str, top_k: int = 5) -> list[dict]:
         if not question or not question.strip():
             raise ValueError("question must be a non-empty string")
         if top_k < 1:
             raise ValueError("top_k must be >= 1")
-        self.received_question = question
+        self.received_queries.append(question)
         self.received_top_k = top_k
+        if isinstance(self._results, dict):
+            return self._results.get(question, [])[:top_k]
         return self._results[:top_k]
 
 
@@ -294,16 +304,76 @@ def test_no_history_leaves_the_prompt_byte_identical():
     assert store_a.received_question == "What powers a cell?"
 
 
-def test_retrieval_query_is_augmented_with_the_last_user_turn():
+def test_retrieval_runs_both_the_bare_and_augmented_queries():
     store = FakeVectorStore(FIVE_RESULTS)
 
     answer_question("and the second part?", store, history=TWO_TURNS)
 
-    # the previous user question is prepended so the retriever sees the
-    # subject; the assistant turn is NOT included
-    assert store.received_question == (
-        "How is the Meridian Bridge built?\nand the second part?"
+    # query 1: the question as-is; query 2: last *user* turn + question
+    # (the assistant turn is not used for retrieval)
+    assert store.received_queries == [
+        "and the second part?",
+        "How is the Meridian Bridge built?\nand the second part?",
+    ]
+
+
+def test_no_history_runs_a_single_retrieval_query():
+    store = FakeVectorStore(FIVE_RESULTS)
+
+    answer_question("What powers a cell?", store)
+
+    assert store.received_queries == ["What powers a cell?"]
+
+
+def test_dual_retrieval_merges_results_from_both_queries():
+    # A self-contained new question on a different topic: its own chunks
+    # come from the bare query, the previous topic's from the augmented
+    # one — both should be considered, best score per chunk, top_k overall.
+    pto = _result("PTO accrues at 1.5 days per month.", "hr.md", 3, 0.71)
+    bridge = _result("The Meridian Bridge has two spans.", "bridge.md", 1, 0.66)
+    store = FakeVectorStore(
+        {
+            "How much PTO do I get?": [pto],
+            "How is the Meridian Bridge built?\nHow much PTO do I get?": [
+                bridge,
+                pto,
+            ],
+        }
     )
+
+    result = answer_question(
+        "How much PTO do I get?", store, top_k=5, history=TWO_TURNS
+    )
+
+    texts = {c["text"] for c in result["citations"]}
+    assert pto["text"] in texts  # not crowded out by the old topic
+    assert bridge["text"] in texts
+    # merged, ranked by score, no duplicate of pto
+    assert [c["text"] for c in result["citations"]] == [pto["text"], bridge["text"]]
+
+
+def test_empty_question_with_history_still_raises_value_error():
+    store = FakeVectorStore(FIVE_RESULTS)
+
+    with pytest.raises(ValueError):
+        answer_question("   ", store, history=TWO_TURNS)
+
+
+def test_prior_answer_citation_markers_are_stripped_from_history_block():
+    store = FakeVectorStore(FIVE_RESULTS)
+    history = [
+        {"role": "user", "content": "What is the deck made of?"},
+        {"role": "assistant", "content": "The deck is steel [2] and was added later [3]."},
+    ]
+
+    result = answer_question("and the trusses?", store, top_k=1, history=history)
+
+    hist_block = (
+        result["prompt"].split("Conversation so far:")[1].split("Context:")[0]
+    )
+    assert "Assistant: The deck is steel and was added later." in hist_block
+    assert "[2]" not in hist_block
+    assert "[3]" not in hist_block
 
 
 def test_history_is_trimmed_to_the_last_max_messages():
