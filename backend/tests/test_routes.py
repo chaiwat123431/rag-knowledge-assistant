@@ -110,12 +110,14 @@ def test_query_empty_question_returns_400(client, question):
     assert response.status_code == 400
 
 
-def test_query_non_positive_top_k_returns_400(client):
+@pytest.mark.parametrize("top_k", [0, -1, 999])
+def test_query_out_of_range_top_k_returns_422(client, top_k):
+    # top_k bounds are enforced by the request model -> 422, not our 400.
     c = client(FakeStore([_result("x", "d.md", 0, 0.9)]))
 
-    response = c.post("/query", json={"question": "hi", "top_k": 0})
+    response = c.post("/query", json={"question": "hi", "top_k": top_k})
 
-    assert response.status_code == 400
+    assert response.status_code == 422
 
 
 def test_query_missing_question_field_returns_422(client):
@@ -216,9 +218,25 @@ def test_documents_empty_text_returns_400(client):
     assert not store.added
 
 
+def test_documents_indexing_backend_failure_returns_503(client):
+    class FailingStore(FakeStore):
+        def add_documents(self, chunks, source):
+            raise OSError("could not fetch the embedding model")
+
+    c = client(FailingStore())
+
+    response = c.post(
+        "/documents",
+        files={"file": ("notes.txt", b"one two three four five", "text/plain")},
+    )
+
+    assert response.status_code == 503
+
+
 def test_documents_no_filename_part_is_rejected(client):
-    # An upload part with no filename isn't parsed as a file — FastAPI
-    # rejects the request before our handler runs.
+    # An upload part with no filename is rejected — either by FastAPI's
+    # validation (422) or, if a Starlette version still parses it as an
+    # UploadFile, by our own `if not file.filename` guard (400).
     c = client(FakeStore())
 
     response = c.post(
@@ -226,7 +244,7 @@ def test_documents_no_filename_part_is_rejected(client):
         files={"file": ("", b"some content", "text/plain")},
     )
 
-    assert response.status_code == 422
+    assert response.status_code in (400, 422)
 
 
 # --- end-to-end through real retrieval --------------------------------------

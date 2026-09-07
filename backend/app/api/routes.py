@@ -2,9 +2,10 @@
 
 Thin layer over the retrieval modules — parse/chunk/store for ingestion,
 `answer_with_llm` for queries. All the real work lives in `app.ingestion`
-and `app.retrieval`; this module only maps it to HTTP and turns the
-domain errors into the right status codes (400 for bad input, 503 when
-the LLM backend is down — never a bare 500).
+and `app.retrieval`; this module maps it to HTTP and turns the *known*
+domain errors into deliberate status codes: 400 for bad input, 503 when a
+backend (the LLM, or the embedding model on first ingest) is unavailable.
+Genuinely unexpected failures still surface as 500 — that's correct.
 
 Dependencies
 ------------
@@ -13,6 +14,12 @@ process, shared by every request. `get_llm` returns the callable used to
 generate answers (`llm.generate_answer` by default). Both are FastAPI
 dependencies so tests can override them (`app.dependency_overrides`) to
 point at a temp Chroma dir and a stub LLM.
+
+Note: the handlers are sync (`def`), so each request holds a threadpool
+worker for the duration of its blocking work (embedding, Chroma, the LLM
+HTTP call — up to `llm.DEFAULT_TIMEOUT`). Fine for the single-user local
+target; a multi-user deployment would want async handlers + a streaming
+LLM call.
 """
 
 import os
@@ -22,15 +29,21 @@ from pathlib import Path
 from typing import Callable
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.ingestion.chunker import chunk_text
-from app.ingestion.parser import extract_text
+from app.ingestion.parser import (
+    SUPPORTED_PDF_EXTENSIONS,
+    SUPPORTED_TEXT_EXTENSIONS,
+    extract_text,
+)
 from app.retrieval.llm import LLMError, generate_answer
 from app.retrieval.query_flow import answer_with_llm
 from app.retrieval.vector_store import VectorStore
 
-SUPPORTED_EXTENSIONS = {".pdf", ".txt", ".md"}
+# Kept in sync with the parser by importing its constants rather than
+# re-listing extensions here.
+SUPPORTED_EXTENSIONS = SUPPORTED_TEXT_EXTENSIONS | SUPPORTED_PDF_EXTENSIONS
 
 router = APIRouter()
 
@@ -51,7 +64,7 @@ def get_llm() -> Callable[..., str]:
 
 class QueryRequest(BaseModel):
     question: str
-    top_k: int = 5
+    top_k: int = Field(default=5, ge=1, le=50)
 
 
 class Citation(BaseModel):
@@ -80,7 +93,7 @@ class IngestResponse(BaseModel):
     "/query",
     response_model=QueryResponse,
     responses={
-        400: {"description": "Empty question or top_k < 1"},
+        400: {"description": "Empty question"},
         503: {"description": "LLM backend unavailable / timed out"},
     },
 )
@@ -89,13 +102,16 @@ def query(
     store: VectorStore = Depends(get_vector_store),
     generate: Callable[..., str] = Depends(get_llm),
 ) -> QueryResponse:
+    # Validate the client input here so the only ValueError that can reach
+    # the `except` below is a genuine internal fault (which should 500, not
+    # be relabelled 400). top_k range is enforced by the model (-> 422).
+    if not request.question.strip():
+        raise HTTPException(status_code=400, detail="question must not be empty")
+
     try:
         result = answer_with_llm(
             request.question, store, top_k=request.top_k, generate=generate
         )
-    except ValueError as exc:
-        # empty question / top_k < 1
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except LLMError as exc:
         # Ollama down / timed out / model missing — a backend problem,
         # not a client error.
@@ -142,14 +158,13 @@ def ingest_document(
         )
 
     # The parser works off a path, so land the upload in a temp file that
-    # keeps the extension (the parser dispatches on it).
+    # keeps the extension (the parser dispatches on it). Record the path
+    # before writing so a failed write is still cleaned up.
     tmp_path = None
     try:
-        with tempfile.NamedTemporaryFile(
-            suffix=suffix, delete=False
-        ) as tmp:
-            tmp.write(file.file.read())
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
             tmp_path = tmp.name
+            tmp.write(file.file.read())
         try:
             text = extract_text(tmp_path)
         except ValueError as exc:
@@ -166,5 +181,14 @@ def ingest_document(
             detail="no extractable text in the uploaded document",
         )
 
-    store.add_documents(chunks, source=file.filename)
+    try:
+        store.add_documents(chunks, source=file.filename)
+    except OSError as exc:
+        # e.g. the embedding model can't be fetched on first ingest, or a
+        # Chroma write fails — backend not ready, not the client's fault.
+        raise HTTPException(
+            status_code=503,
+            detail=f"could not index document (backend unavailable): {exc}",
+        ) from exc
+
     return IngestResponse(source=file.filename, chunks_added=len(chunks))
