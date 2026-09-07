@@ -94,8 +94,17 @@ rag-assistant/
   - `POST /query` `{question, top_k?}` -> `{answer, has_context, citations}`; `POST /documents` (file upload) -> parse/chunk/`add_documents`
   - error mapping: empty question -> 400, out-of-range `top_k` -> 422, unsupported/unreadable/empty file -> 400, Ollama down/timeout & indexing-backend failure -> 503 (transient), `OllamaModelNotFoundError` -> 500 (non-retryable misconfig)
   - `VectorStore` + LLM callable injected via `lru_cache`d FastAPI dependencies, overridable in tests (`app.dependency_overrides`)
-- [ ] Conversational follow-up memory
+- [x] Conversational follow-up memory (`query_flow.py` + `routes.py` + tests) — `feature/conversational-memory`, PR #7
+  - Stateless "client sends the transcript": `POST /query` takes optional `history: [{role, content}]`
+  - Prompt: "Conversation so far:" block between instructions and Context; last `MAX_HISTORY_MESSAGES` (6) kept; our `[n]` markers stripped from prior assistant turns
+  - Retrieval runs two queries (bare question + last-user-turn-augmented) and merges — a follow-up like "and the second part?" still retrieves the subject, a self-contained new question keeps its own chunks
+  - `history=None`/`[]` is byte-identical to before; malformed history -> `InvalidHistoryError` -> 400
 - [ ] Frontend (Phase 3)
+
+## Phase 1 MVP: complete
+All backend slices done. `POST /documents` to ingest, `POST /query` (with optional
+`history`) to ask cited, conversation-aware questions. Next: the Next.js frontend
+(Phase 3).
 
 ## Git Workflow
 - `main` branch stays stable/working

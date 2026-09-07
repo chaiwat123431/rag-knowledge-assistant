@@ -49,7 +49,7 @@ from app.retrieval.llm import (
     OllamaModelNotFoundError,
     generate_answer,
 )
-from app.retrieval.query_flow import answer_with_llm
+from app.retrieval.query_flow import InvalidHistoryError, answer_with_llm
 from app.retrieval.vector_store import VectorStore
 
 # Kept in sync with the parser by importing its constants rather than
@@ -73,9 +73,20 @@ def get_llm() -> Callable[..., str]:
 # --- request / response models ---------------------------------------------
 
 
+class HistoryMessage(BaseModel):
+    # Both fields are optional at the schema level on purpose: a missing /
+    # null / wrongly-typed role or content should surface as our own 400
+    # (from _validate_history), not a 422, per the "malformed history ->
+    # 400" contract. Only a structurally wrong `history` (not a list of
+    # objects) is left to pydantic (422).
+    role: str | None = None
+    content: str | None = None
+
+
 class QueryRequest(BaseModel):
     question: str
     top_k: int = Field(default=5, ge=1, le=50)
+    history: list[HistoryMessage] | None = None
 
 
 class Citation(BaseModel):
@@ -104,7 +115,7 @@ class IngestResponse(BaseModel):
     "/query",
     response_model=QueryResponse,
     responses={
-        400: {"description": "Empty question"},
+        400: {"description": "Empty question or malformed history"},
         500: {"description": "LLM misconfigured (model not pulled)"},
         503: {"description": "LLM backend unavailable / timed out"},
     },
@@ -120,10 +131,20 @@ def query(
     if not request.question.strip():
         raise HTTPException(status_code=400, detail="question must not be empty")
 
+    history = (
+        [m.model_dump() for m in request.history] if request.history else None
+    )
+
     try:
         result = answer_with_llm(
-            request.question, store, top_k=request.top_k, generate=generate
+            request.question,
+            store,
+            top_k=request.top_k,
+            history=history,
+            generate=generate,
         )
+    except InvalidHistoryError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except OllamaModelNotFoundError as exc:
         # Ollama is up but the model was never pulled — not transient,
         # retrying won't help; an operator must fix it.

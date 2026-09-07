@@ -1,8 +1,10 @@
 import pytest
 
 from app.retrieval.query_flow import (
+    MAX_HISTORY_MESSAGES,
     MIN_RELEVANCE_SCORE,
     NO_CONTEXT_ANSWER,
+    InvalidHistoryError,
     answer_question,
     answer_with_llm,
     build_prompt,
@@ -13,20 +15,30 @@ from app.retrieval.vector_store import VectorStore
 class FakeVectorStore:
     """Stands in for VectorStore so these tests exercise prompt/citation
     assembly in isolation, without loading the embedding model or Chroma
-    (retrieval itself is covered by test_vector_store.py)."""
+    (retrieval itself is covered by test_vector_store.py).
 
-    def __init__(self, results: list[dict]):
+    `results` may be a flat list (returned for any query) or a dict mapping
+    an exact query string to its result list (for testing dual retrieval).
+    """
+
+    def __init__(self, results):
         self._results = results
-        self.received_question = None
+        self.received_queries: list[str] = []
         self.received_top_k = None
+
+    @property
+    def received_question(self):  # back-compat for older tests
+        return self.received_queries[-1] if self.received_queries else None
 
     def query(self, question: str, top_k: int = 5) -> list[dict]:
         if not question or not question.strip():
             raise ValueError("question must be a non-empty string")
         if top_k < 1:
             raise ValueError("top_k must be >= 1")
-        self.received_question = question
+        self.received_queries.append(question)
         self.received_top_k = top_k
+        if isinstance(self._results, dict):
+            return self._results.get(question, [])[:top_k]
         return self._results[:top_k]
 
 
@@ -251,6 +263,185 @@ def test_citation_markers_match_prompt_markers():
         # citation's own text
         block_header = f"[{marker}] (source: {citation['source']}"
         assert block_header in result["prompt"]
+
+
+# --- conversation history -----------------------------------------------
+
+TWO_TURNS = [
+    {"role": "user", "content": "How is the Meridian Bridge built?"},
+    {"role": "assistant", "content": "It has a lower truss and an upper deck."},
+]
+
+
+def test_history_is_rendered_into_the_prompt():
+    store = FakeVectorStore(FIVE_RESULTS)
+
+    result = answer_question(
+        "and the second part?", store, top_k=2, history=TWO_TURNS
+    )
+
+    prompt = result["prompt"]
+    assert "Conversation so far:" in prompt
+    assert "User: How is the Meridian Bridge built?" in prompt
+    assert "Assistant: It has a lower truss and an upper deck." in prompt
+    # history sits between the instructions and the Context block
+    assert prompt.index("Conversation so far:") < prompt.index("Context:")
+    assert prompt.index("Context:") < prompt.index("Question: and the second part?")
+
+
+def test_no_history_leaves_the_prompt_byte_identical():
+    store_a = FakeVectorStore(FIVE_RESULTS)
+    store_b = FakeVectorStore(FIVE_RESULTS)
+    store_c = FakeVectorStore(FIVE_RESULTS)
+
+    without = answer_question("What powers a cell?", store_a, top_k=3)
+    none_ = answer_question("What powers a cell?", store_b, top_k=3, history=None)
+    empty = answer_question("What powers a cell?", store_c, top_k=3, history=[])
+
+    assert without["prompt"] == none_["prompt"] == empty["prompt"]
+    assert "Conversation so far:" not in without["prompt"]
+    # retrieval query is the bare question when there's no history
+    assert store_a.received_question == "What powers a cell?"
+
+
+def test_retrieval_runs_both_the_bare_and_augmented_queries():
+    store = FakeVectorStore(FIVE_RESULTS)
+
+    answer_question("and the second part?", store, history=TWO_TURNS)
+
+    # query 1: the question as-is; query 2: last *user* turn + question
+    # (the assistant turn is not used for retrieval)
+    assert store.received_queries == [
+        "and the second part?",
+        "How is the Meridian Bridge built?\nand the second part?",
+    ]
+
+
+def test_no_history_runs_a_single_retrieval_query():
+    store = FakeVectorStore(FIVE_RESULTS)
+
+    answer_question("What powers a cell?", store)
+
+    assert store.received_queries == ["What powers a cell?"]
+
+
+def test_dual_retrieval_merges_results_from_both_queries():
+    # A self-contained new question on a different topic: its own chunks
+    # come from the bare query, the previous topic's from the augmented
+    # one — both should be considered, best score per chunk, top_k overall.
+    pto = _result("PTO accrues at 1.5 days per month.", "hr.md", 3, 0.71)
+    bridge = _result("The Meridian Bridge has two spans.", "bridge.md", 1, 0.66)
+    store = FakeVectorStore(
+        {
+            "How much PTO do I get?": [pto],
+            "How is the Meridian Bridge built?\nHow much PTO do I get?": [
+                bridge,
+                pto,
+            ],
+        }
+    )
+
+    result = answer_question(
+        "How much PTO do I get?", store, top_k=5, history=TWO_TURNS
+    )
+
+    texts = {c["text"] for c in result["citations"]}
+    assert pto["text"] in texts  # not crowded out by the old topic
+    assert bridge["text"] in texts
+    # merged, ranked by score, no duplicate of pto
+    assert [c["text"] for c in result["citations"]] == [pto["text"], bridge["text"]]
+
+
+def test_empty_question_with_history_still_raises_value_error():
+    store = FakeVectorStore(FIVE_RESULTS)
+
+    with pytest.raises(ValueError):
+        answer_question("   ", store, history=TWO_TURNS)
+
+
+def test_prior_answer_citation_markers_are_stripped_from_history_block():
+    store = FakeVectorStore(FIVE_RESULTS)
+    history = [
+        {"role": "user", "content": "What is the deck made of?"},
+        {"role": "assistant", "content": "The deck is steel [2] and was added later [3]."},
+    ]
+
+    result = answer_question("and the trusses?", store, top_k=1, history=history)
+
+    hist_block = (
+        result["prompt"].split("Conversation so far:")[1].split("Context:")[0]
+    )
+    assert "Assistant: The deck is steel and was added later." in hist_block
+    assert "[2]" not in hist_block
+    assert "[3]" not in hist_block
+
+
+def test_history_is_trimmed_to_the_last_max_messages():
+    store = FakeVectorStore(FIVE_RESULTS)
+    long_history = [
+        {
+            "role": "user" if i % 2 == 0 else "assistant",
+            "content": f"<<msg-{i:02d}>>",  # not a prefix of one another
+        }
+        for i in range(40)
+    ]
+
+    result = answer_question("q", store, top_k=2, history=long_history)
+
+    prompt = result["prompt"]
+    for message in long_history[-MAX_HISTORY_MESSAGES:]:
+        assert message["content"] in prompt
+    for message in long_history[:-MAX_HISTORY_MESSAGES]:
+        assert message["content"] not in prompt
+
+
+@pytest.mark.parametrize(
+    "bad_history",
+    [
+        [{"role": "system", "content": "nope"}],
+        [{"role": "user", "content": "ok"}, {"role": "bot", "content": "x"}],
+        [{"role": "user", "content": ""}],
+        [{"role": "user", "content": "   "}],
+        [{"role": "user", "content": None}],
+        [{"role": "user"}],  # missing content
+        [{"content": "no role"}],
+        ["not an object"],
+        "not a list",
+    ],
+)
+def test_malformed_history_raises_invalid_history_error(bad_history):
+    store = FakeVectorStore(FIVE_RESULTS)
+
+    with pytest.raises(InvalidHistoryError):
+        answer_question("q", store, history=bad_history)
+
+
+def test_answer_with_llm_forwards_history_to_the_prompt():
+    store = FakeVectorStore(FIVE_RESULTS)
+    seen = {}
+
+    def generate(prompt, model="fake"):
+        seen["prompt"] = prompt
+        return "answer"
+
+    answer_with_llm(
+        "and the second part?", store, top_k=2,
+        history=TWO_TURNS, generate=generate,
+    )
+
+    assert "Conversation so far:" in seen["prompt"]
+    assert "User: How is the Meridian Bridge built?" in seen["prompt"]
+
+
+def test_answer_with_llm_rejects_malformed_history_before_calling_llm():
+    store = FakeVectorStore(FIVE_RESULTS)
+
+    with pytest.raises(InvalidHistoryError):
+        answer_with_llm(
+            "q", store,
+            history=[{"role": "nope", "content": "x"}],
+            generate=lambda *a, **k: pytest.fail("LLM must not be called"),
+        )
 
 
 # --- answer_with_llm: the full pipeline, with an injected fake LLM --------
