@@ -1,8 +1,10 @@
 import pytest
 
 from app.retrieval.query_flow import (
+    MAX_HISTORY_MESSAGES,
     MIN_RELEVANCE_SCORE,
     NO_CONTEXT_ANSWER,
+    InvalidHistoryError,
     answer_question,
     answer_with_llm,
     build_prompt,
@@ -251,6 +253,125 @@ def test_citation_markers_match_prompt_markers():
         # citation's own text
         block_header = f"[{marker}] (source: {citation['source']}"
         assert block_header in result["prompt"]
+
+
+# --- conversation history -----------------------------------------------
+
+TWO_TURNS = [
+    {"role": "user", "content": "How is the Meridian Bridge built?"},
+    {"role": "assistant", "content": "It has a lower truss and an upper deck."},
+]
+
+
+def test_history_is_rendered_into_the_prompt():
+    store = FakeVectorStore(FIVE_RESULTS)
+
+    result = answer_question(
+        "and the second part?", store, top_k=2, history=TWO_TURNS
+    )
+
+    prompt = result["prompt"]
+    assert "Conversation so far:" in prompt
+    assert "User: How is the Meridian Bridge built?" in prompt
+    assert "Assistant: It has a lower truss and an upper deck." in prompt
+    # history sits between the instructions and the Context block
+    assert prompt.index("Conversation so far:") < prompt.index("Context:")
+    assert prompt.index("Context:") < prompt.index("Question: and the second part?")
+
+
+def test_no_history_leaves_the_prompt_byte_identical():
+    store_a = FakeVectorStore(FIVE_RESULTS)
+    store_b = FakeVectorStore(FIVE_RESULTS)
+    store_c = FakeVectorStore(FIVE_RESULTS)
+
+    without = answer_question("What powers a cell?", store_a, top_k=3)
+    none_ = answer_question("What powers a cell?", store_b, top_k=3, history=None)
+    empty = answer_question("What powers a cell?", store_c, top_k=3, history=[])
+
+    assert without["prompt"] == none_["prompt"] == empty["prompt"]
+    assert "Conversation so far:" not in without["prompt"]
+    # retrieval query is the bare question when there's no history
+    assert store_a.received_question == "What powers a cell?"
+
+
+def test_retrieval_query_is_augmented_with_the_last_user_turn():
+    store = FakeVectorStore(FIVE_RESULTS)
+
+    answer_question("and the second part?", store, history=TWO_TURNS)
+
+    # the previous user question is prepended so the retriever sees the
+    # subject; the assistant turn is NOT included
+    assert store.received_question == (
+        "How is the Meridian Bridge built?\nand the second part?"
+    )
+
+
+def test_history_is_trimmed_to_the_last_max_messages():
+    store = FakeVectorStore(FIVE_RESULTS)
+    long_history = [
+        {
+            "role": "user" if i % 2 == 0 else "assistant",
+            "content": f"<<msg-{i:02d}>>",  # not a prefix of one another
+        }
+        for i in range(40)
+    ]
+
+    result = answer_question("q", store, top_k=2, history=long_history)
+
+    prompt = result["prompt"]
+    for message in long_history[-MAX_HISTORY_MESSAGES:]:
+        assert message["content"] in prompt
+    for message in long_history[:-MAX_HISTORY_MESSAGES]:
+        assert message["content"] not in prompt
+
+
+@pytest.mark.parametrize(
+    "bad_history",
+    [
+        [{"role": "system", "content": "nope"}],
+        [{"role": "user", "content": "ok"}, {"role": "bot", "content": "x"}],
+        [{"role": "user", "content": ""}],
+        [{"role": "user", "content": "   "}],
+        [{"role": "user", "content": None}],
+        [{"role": "user"}],  # missing content
+        [{"content": "no role"}],
+        ["not an object"],
+        "not a list",
+    ],
+)
+def test_malformed_history_raises_invalid_history_error(bad_history):
+    store = FakeVectorStore(FIVE_RESULTS)
+
+    with pytest.raises(InvalidHistoryError):
+        answer_question("q", store, history=bad_history)
+
+
+def test_answer_with_llm_forwards_history_to_the_prompt():
+    store = FakeVectorStore(FIVE_RESULTS)
+    seen = {}
+
+    def generate(prompt, model="fake"):
+        seen["prompt"] = prompt
+        return "answer"
+
+    answer_with_llm(
+        "and the second part?", store, top_k=2,
+        history=TWO_TURNS, generate=generate,
+    )
+
+    assert "Conversation so far:" in seen["prompt"]
+    assert "User: How is the Meridian Bridge built?" in seen["prompt"]
+
+
+def test_answer_with_llm_rejects_malformed_history_before_calling_llm():
+    store = FakeVectorStore(FIVE_RESULTS)
+
+    with pytest.raises(InvalidHistoryError):
+        answer_with_llm(
+            "q", store,
+            history=[{"role": "nope", "content": "x"}],
+            generate=lambda *a, **k: pytest.fail("LLM must not be called"),
+        )
 
 
 # --- answer_with_llm: the full pipeline, with an injected fake LLM --------

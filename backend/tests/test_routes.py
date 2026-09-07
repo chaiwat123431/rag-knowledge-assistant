@@ -8,7 +8,7 @@ from app.retrieval.llm import (
     OllamaTimeoutError,
     OllamaUnavailableError,
 )
-from app.retrieval.query_flow import NO_CONTEXT_ANSWER
+from app.retrieval.query_flow import MAX_HISTORY_MESSAGES, NO_CONTEXT_ANSWER
 
 
 class FakeStore:
@@ -195,6 +195,118 @@ def test_query_llm_model_not_found_returns_500(client):
 
     assert response.status_code == 500
     assert "ollama pull" in response.json()["detail"].lower()
+
+
+# --- /query conversation history --------------------------------------------
+
+
+def test_query_with_history_passes_it_to_the_llm(client):
+    store = FakeStore([_result("The bridge has two spans.", "bridge.md", 4, 0.8)])
+    seen = {}
+
+    def capture(prompt, model="stub"):
+        seen["prompt"] = prompt
+        return "The second span was added in 1961 [1]."
+
+    c = client(store, generate=capture)
+
+    response = c.post(
+        "/query",
+        json={
+            "question": "and the second one?",
+            "history": [
+                {"role": "user", "content": "When was the first span built?"},
+                {"role": "assistant", "content": "The first span opened in 1932."},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    assert "Conversation so far:" in seen["prompt"]
+    assert "User: When was the first span built?" in seen["prompt"]
+    assert "Assistant: The first span opened in 1932." in seen["prompt"]
+
+
+def test_query_without_history_is_unchanged(client):
+    store = FakeStore([_result("x", "d.md", 0, 0.9)])
+    seen = {}
+
+    def capture(prompt, model="stub"):
+        seen["prompt"] = prompt
+        return "ok"
+
+    c = client(store, generate=capture)
+
+    r1 = c.post("/query", json={"question": "hello"})
+    p1 = seen["prompt"]
+    r2 = c.post("/query", json={"question": "hello", "history": None})
+    p2 = seen["prompt"]
+
+    assert r1.status_code == r2.status_code == 200
+    assert p1 == p2
+    assert "Conversation so far:" not in p1
+
+
+@pytest.mark.parametrize(
+    "history",
+    [
+        [{"role": "system", "content": "nope"}],
+        [{"role": "user", "content": ""}],
+        [{"role": "user", "content": "   "}],
+    ],
+)
+def test_query_malformed_history_returns_400(client, history):
+    c = client(
+        FakeStore([_result("x", "d.md", 0, 0.9)]),
+        generate=lambda *a, **k: pytest.fail("LLM must not be called"),
+    )
+
+    response = c.post(
+        "/query", json={"question": "a question", "history": history}
+    )
+
+    assert response.status_code == 400
+
+
+def test_query_history_wrong_shape_returns_422(client):
+    # not even the {role, content} object shape -> pydantic rejects it
+    c = client(FakeStore([_result("x", "d.md", 0, 0.9)]))
+
+    response = c.post(
+        "/query", json={"question": "q", "history": "not a list"}
+    )
+
+    assert response.status_code == 422
+
+
+def test_query_long_history_is_truncated_in_the_prompt(client):
+    store = FakeStore([_result("x", "d.md", 0, 0.9)])
+    seen = {}
+
+    def capture(prompt, model="stub"):
+        seen["prompt"] = prompt
+        return "ok"
+
+    c = client(store, generate=capture)
+
+    n = 30
+    history = [
+        {
+            "role": "user" if i % 2 == 0 else "assistant",
+            "content": f"<<h{i:02d}>>",
+        }
+        for i in range(n)
+    ]
+
+    response = c.post(
+        "/query", json={"question": "q", "history": history}
+    )
+
+    assert response.status_code == 200
+    for i in range(n - MAX_HISTORY_MESSAGES, n):  # last N kept
+        assert f"<<h{i:02d}>>" in seen["prompt"]
+    for i in range(n - MAX_HISTORY_MESSAGES):  # older dropped
+        assert f"<<h{i:02d}>>" not in seen["prompt"]
 
 
 # --- /documents ---------------------------------------------------------
