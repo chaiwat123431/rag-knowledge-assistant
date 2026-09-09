@@ -30,7 +30,7 @@ files.
 | LLM (prod) | Google Gemini API — Flash model (free tier) | Free tier covers portfolio-scale usage; no local GPU needed on the deployment host. Replaces the earlier implicit OpenAI assumption. |
 | LLM call — direct HTTP, not LangChain | `llm.generate_answer()` calls Ollama's `/api/generate` with `httpx` directly | One narrow function is easier to reason about and test than a LangChain LLM wrapper for a single call; `answer_with_llm` takes an injectable `generate` callable so the Gemini prod backend is a drop-in. `httpx` over `requests`: FastAPI-native, async-ready, constructible `Response` for deterministic test mocking. |
 | Chunking | Recursive character splitter, ~500 tokens, 50 token overlap | Balances context completeness vs. retrieval precision. **Implemented as a custom word-boundary splitter instead** (character-based, no token count), not LangChain's `RecursiveCharacterTextSplitter` — revisit if paragraph/sentence-aware splitting turns out to matter once retrieval quality is measured. |
-| Frontend | Next.js + TypeScript | Separate phase; not part of Phase 1 |
+| Frontend | Next.js 16 (App Router) + TypeScript + Tailwind v4 | Phase 3. `create-next-app@latest` installed 16 (not the planned "14+"): Turbopack by default, Tailwind v4, React 19. Native `fetch` + `useState` for now — no shadcn/ui, no TanStack Query. |
 
 ## Data Flow
 
@@ -62,7 +62,9 @@ rag-assistant/
 │   ├── tests/
 │   ├── requirements.txt
 │   └── .env.example
-├── frontend/                    # Phase 3, not yet created
+├── frontend/                    # Next.js 16 (App Router) + TS + Tailwind v4 [scaffold done]
+│   ├── app/page.tsx             # upload + chat UI (single file)
+│   └── lib/api.ts               # typed backend client
 ├── PLANNING.md
 └── .gitignore
 ```
@@ -100,11 +102,16 @@ rag-assistant/
   - Retrieval runs two queries (bare question + last-user-turn-augmented) and merges — a follow-up like "and the second part?" still retrieves the subject, a self-contained new question keeps its own chunks
   - `history=None`/`[]` is byte-identical to before; malformed history -> `InvalidHistoryError` -> 400
 - [ ] Frontend (Phase 3)
+  - [x] Scaffold (`frontend/`, Next.js 16 App Router + TS + Tailwind v4) — `feature/frontend-scaffold`, PR #8
+    - single `app/page.tsx`: file upload -> `POST /documents`; chat (input + Send) -> `POST /query` with `history`; citations under each answer; "Thinking…" indicator; errors shown, not thrown
+    - `lib/api.ts`: typed `ingestDocument` / `askQuestion`, `ApiError` normalizing FastAPI `detail`, `AbortSignal.timeout`
+    - backend: `CORSMiddleware` for the Next dev origin (`FRONTEND_ORIGINS` env, `load_dotenv()`); `create-next-app` pulled Next **16**, not 14
+  - [ ] Polish: styling, component split, streaming answers, conversation reset
+  - **Note on stack:** planned as "Next.js 14+"; `create-next-app@latest` installed 16.3 (Turbopack default, Tailwind v4, React 19).
 
 ## Phase 1 MVP: complete
 All backend slices done. `POST /documents` to ingest, `POST /query` (with optional
-`history`) to ask cited, conversation-aware questions. Next: the Next.js frontend
-(Phase 3).
+`history`) to ask cited, conversation-aware questions.
 
 ## Git Workflow
 - `main` branch stays stable/working
