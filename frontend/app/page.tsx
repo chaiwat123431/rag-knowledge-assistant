@@ -2,75 +2,35 @@
 
 import { useEffect, useRef, useState } from "react";
 
-import {
-  ApiError,
-  askQuestion,
-  ingestDocument,
-  type Citation,
-  type HistoryMessage,
-  type Role,
-} from "@/lib/api";
-
-interface ChatMessage {
-  role: Role;
-  content: string;
-  citations?: Citation[];
-}
-
-type UploadState = "idle" | "uploading" | "done" | "error";
-
-function errorText(err: unknown): string {
-  if (err instanceof ApiError) {
-    const where = err.status ? `HTTP ${err.status}` : "network error";
-    return `${where}: ${err.message}`;
-  }
-  return "Something went wrong.";
-}
+import { ChatComposer } from "@/components/ChatComposer";
+import { DocumentUpload } from "@/components/DocumentUpload";
+import { MessageBubble } from "@/components/MessageBubble";
+import { Button } from "@/components/ui/button";
+import { askQuestion, type HistoryMessage } from "@/lib/api";
+import { errorText, type Message } from "@/lib/chat";
 
 export default function Home() {
-  // --- upload state ---
-  const [file, setFile] = useState<File | null>(null);
-  const [uploadState, setUploadState] = useState<UploadState>("idle");
-  const [uploadMessage, setUploadMessage] = useState("");
-  const fileInputRef = useRef<HTMLInputElement>(null);
-
-  // --- chat state (messages doubles as the history sent to the backend) ---
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
-  const [chatLoading, setChatLoading] = useState(false);
-  const [chatError, setChatError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, chatLoading]);
+  }, [messages, loading]);
 
-  async function handleUpload() {
-    if (!file || uploadState === "uploading") return;
-    setUploadState("uploading");
-    setUploadMessage(`Uploading ${file.name}…`);
-    try {
-      const res = await ingestDocument(file);
-      setUploadState("done");
-      setUploadMessage(
-        `Indexed "${res.source}" — ${res.chunks_added} chunk${
-          res.chunks_added === 1 ? "" : "s"
-        } added.`,
-      );
-      setFile(null);
-      if (fileInputRef.current) fileInputRef.current.value = "";
-    } catch (err) {
-      setUploadState("error");
-      setUploadMessage(`Upload failed — ${errorText(err)}`);
-    }
+  function newConversation() {
+    setMessages([]);
+    setInput("");
+    setError(null);
   }
 
-  async function handleSend(e: React.FormEvent) {
-    e.preventDefault();
+  async function handleSend() {
     const question = input.trim();
-    if (!question || chatLoading) return;
+    if (!question || loading) return;
 
-    // history = every turn so far, current question sent separately
+    // history = every prior turn; the current question is sent separately
     const history: HistoryMessage[] = messages.map(({ role, content }) => ({
       role,
       content,
@@ -78,8 +38,8 @@ export default function Home() {
 
     setMessages((prev) => [...prev, { role: "user", content: question }]);
     setInput("");
-    setChatError(null);
-    setChatLoading(true);
+    setError(null);
+    setLoading(true);
 
     try {
       const res = await askQuestion(question, history);
@@ -88,121 +48,66 @@ export default function Home() {
         { role: "assistant", content: res.answer, citations: res.citations },
       ]);
     } catch (err) {
-      setChatError(errorText(err));
+      setError(errorText(err));
       // roll the optimistic question back so a retry starts clean
       setMessages((prev) => prev.slice(0, -1));
       setInput(question);
     } finally {
-      setChatLoading(false);
+      setLoading(false);
     }
   }
 
   return (
-    <main className="mx-auto flex w-full max-w-2xl flex-1 flex-col gap-8 px-4 py-10">
-      <h1 className="text-2xl font-semibold">RAG Assistant</h1>
-
-      {/* --- upload --- */}
-      <section className="rounded-lg border border-black/10 p-4 dark:border-white/15">
-        <h2 className="mb-3 text-sm font-medium uppercase tracking-wide text-zinc-500">
-          Add a document
-        </h2>
-        <div className="flex flex-wrap items-center gap-3">
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept=".pdf,.txt,.md"
-            onChange={(e) => {
-              setFile(e.target.files?.[0] ?? null);
-              setUploadState("idle");
-              setUploadMessage("");
-            }}
-            className="text-sm"
-          />
-          <button
-            type="button"
-            onClick={handleUpload}
-            disabled={!file || uploadState === "uploading"}
-            className="rounded-md bg-zinc-900 px-3 py-1.5 text-sm text-white disabled:opacity-40 dark:bg-white dark:text-zinc-900"
+    <div className="flex flex-1 flex-col">
+      <header className="sticky top-0 z-10 border-b border-border bg-background/80 backdrop-blur">
+        <div className="mx-auto flex max-w-3xl items-center justify-between px-4 py-3">
+          <h1 className="text-sm font-semibold">RAG Assistant</h1>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={newConversation}
+            disabled={loading || messages.length === 0}
           >
-            {uploadState === "uploading" ? "Uploading…" : "Upload"}
-          </button>
+            New conversation
+          </Button>
         </div>
-        {uploadMessage && (
-          <p
-            className={`mt-3 text-sm ${
-              uploadState === "error" ? "text-red-600" : "text-zinc-600 dark:text-zinc-400"
-            }`}
-          >
-            {uploadMessage}
-          </p>
-        )}
-      </section>
+      </header>
 
-      {/* --- chat --- */}
-      <section className="flex flex-1 flex-col gap-4">
-        <h2 className="text-sm font-medium uppercase tracking-wide text-zinc-500">
-          Ask a question
-        </h2>
+      <main className="mx-auto flex w-full max-w-3xl flex-1 flex-col gap-6 px-4 py-6">
+        <DocumentUpload />
 
-        <div className="flex flex-col gap-4">
+        <div className="flex flex-1 flex-col gap-5">
           {messages.length === 0 && (
-            <p className="text-sm text-zinc-500">
+            <p className="text-sm text-muted-foreground">
               No messages yet. Upload a document, then ask something about it.
             </p>
           )}
 
           {messages.map((message, i) => (
-            <div key={i} className="flex flex-col gap-1">
-              <span className="text-xs font-medium uppercase tracking-wide text-zinc-400">
-                {message.role === "user" ? "You" : "Assistant"}
-              </span>
-              <p className="whitespace-pre-wrap text-sm">{message.content}</p>
-
-              {message.citations && message.citations.length > 0 && (
-                <ul className="mt-2 flex flex-col gap-2">
-                  {message.citations.map((citation) => (
-                    <li
-                      key={citation.marker}
-                      className="rounded-md border border-black/10 bg-black/[0.02] p-2 text-xs dark:border-white/15 dark:bg-white/[0.03]"
-                    >
-                      <span className="font-medium">
-                        [{citation.marker}] {citation.source ?? "unknown"}
-                      </span>
-                      <p className="mt-1 whitespace-pre-wrap text-zinc-600 dark:text-zinc-400">
-                        {citation.text}
-                      </p>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
+            <MessageBubble key={i} message={message} />
           ))}
 
-          {chatLoading && (
-            <p className="text-sm text-zinc-500">Thinking… (the local model can take a few seconds)</p>
+          {loading && (
+            <p className="text-sm text-muted-foreground">
+              Thinking… <span className="text-xs">(the local model can take a few seconds)</span>
+            </p>
           )}
-          {chatError && <p className="text-sm text-red-600">{chatError}</p>}
+          {error && <p className="text-sm text-destructive">{error}</p>}
+
           <div ref={bottomRef} />
         </div>
+      </main>
 
-        <form onSubmit={handleSend} className="mt-2 flex gap-2">
-          <input
-            type="text"
+      <div className="sticky bottom-0 border-t border-border bg-background/80 backdrop-blur">
+        <div className="mx-auto max-w-3xl px-4 py-3">
+          <ChatComposer
             value={input}
-            onChange={(e) => setInput(e.target.value)}
-            disabled={chatLoading}
-            placeholder="Ask about your documents…"
-            className="flex-1 rounded-md border border-black/15 bg-transparent px-3 py-2 text-sm outline-none focus:border-black/40 disabled:opacity-50 dark:border-white/20 dark:focus:border-white/50"
+            onChange={setInput}
+            onSubmit={handleSend}
+            disabled={loading}
           />
-          <button
-            type="submit"
-            disabled={chatLoading || input.trim() === ""}
-            className="rounded-md bg-zinc-900 px-4 py-2 text-sm text-white disabled:opacity-40 dark:bg-white dark:text-zinc-900"
-          >
-            Send
-          </button>
-        </form>
-      </section>
-    </main>
+        </div>
+      </div>
+    </div>
   );
 }
