@@ -30,7 +30,17 @@ Copy `.env.local.example` to `.env.local` to change it.
 
 ## Structure
 
-- `app/page.tsx` — the whole UI and its state (single-file scaffold on purpose)
+- `app/page.tsx` — chat orchestration: `messages` / `input` / `loading` state,
+  `handleSend`, "New conversation", page layout
+- `components/` — `DocumentUpload` (owns its own upload state), `MessageBubble`,
+  `Citations`, `ChatComposer`; `components/ui/` holds the shadcn/ui primitives
 - `lib/api.ts` — the network boundary: typed `ingestDocument()` / `askQuestion()`
-  and a normalized `ApiError`
-- `app/layout.tsx` — root layout / metadata
+  and a normalized `ApiError` (unchanged by the UI refactor)
+- `lib/chat.ts` — the `Message` view type and the `errorText` formatter
+- `app/globals.css` — Tailwind v4 + shadcn tokens; dark mode via
+  `prefers-color-scheme` (no toggle)
+
+## UI
+
+shadcn/ui (`radix-nova` style, `neutral` base). Minimal "developer tool" look,
+no custom branding. Dark mode follows the OS setting.

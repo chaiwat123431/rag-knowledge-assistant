@@ -30,7 +30,7 @@ files.
 | LLM (prod) | Google Gemini API — Flash model (free tier) | Free tier covers portfolio-scale usage; no local GPU needed on the deployment host. Replaces the earlier implicit OpenAI assumption. |
 | LLM call — direct HTTP, not LangChain | `llm.generate_answer()` calls Ollama's `/api/generate` with `httpx` directly | One narrow function is easier to reason about and test than a LangChain LLM wrapper for a single call; `answer_with_llm` takes an injectable `generate` callable so the Gemini prod backend is a drop-in. `httpx` over `requests`: FastAPI-native, async-ready, constructible `Response` for deterministic test mocking. |
 | Chunking | Recursive character splitter, ~500 tokens, 50 token overlap | Balances context completeness vs. retrieval precision. **Implemented as a custom word-boundary splitter instead** (character-based, no token count), not LangChain's `RecursiveCharacterTextSplitter` — revisit if paragraph/sentence-aware splitting turns out to matter once retrieval quality is measured. |
-| Frontend | Next.js 16 (App Router) + TypeScript + Tailwind v4 | Phase 3. `create-next-app@latest` installed 16 (not the planned "14+"): Turbopack by default, Tailwind v4, React 19. Native `fetch` + `useState` for now — no shadcn/ui, no TanStack Query. |
+| Frontend | Next.js 16 (App Router) + TypeScript + Tailwind v4 + shadcn/ui | Phase 3. `create-next-app@latest` installed 16 (not the planned "14+"): Turbopack by default, Tailwind v4, React 19. shadcn/ui `radix-nova` style; native `fetch` + `useState` (no TanStack Query yet). Dark mode via `prefers-color-scheme`, no toggle. |
 
 ## Data Flow
 
@@ -106,7 +106,12 @@ rag-assistant/
     - single `app/page.tsx`: file upload -> `POST /documents`; chat (input + Send) -> `POST /query` with `history`; citations under each answer; "Thinking…" indicator; errors shown, not thrown
     - `lib/api.ts`: typed `ingestDocument` / `askQuestion`, `ApiError` normalizing FastAPI `detail`, `AbortSignal.timeout`
     - backend: `CORSMiddleware` for the Next dev origin (`FRONTEND_ORIGINS` env, `load_dotenv()`); `create-next-app` pulled Next **16**, not 14
-  - [ ] Polish: styling, component split, streaming answers, conversation reset
+  - [x] shadcn/ui + component split + "New conversation" — `feature/frontend-polish`, PR #9
+    - shadcn/ui via `shadcn init` (radix-nova, neutral); dark mode kept on `prefers-color-scheme` (no toggle) — token overrides moved to a `@media` block, `.dark` custom-variant dropped
+    - `components/`: `DocumentUpload` (owns its upload state), `MessageBubble`, `Citations`, `ChatComposer`; `lib/chat.ts` = `Message` view type + `errorText`
+    - "New conversation" clears chat state (frontend only); lucide icons on the action buttons
+    - `lib/api.ts` unchanged — presentation refactor only
+  - [ ] Polish (later): streaming answers, mobile layout, per-message retry
   - **Note on stack:** planned as "Next.js 14+"; `create-next-app@latest` installed 16.3 (Turbopack default, Tailwind v4, React 19).
 
 ## Phase 1 MVP: complete
