@@ -1,3 +1,7 @@
+"use client";
+
+import { Send } from "lucide-react";
+
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 
@@ -30,7 +34,13 @@ export function ChatComposer({
         className="h-9"
         aria-label="Question"
       />
-      <Button type="submit" size="lg" disabled={disabled || value.trim() === ""}>
+      <Button
+        type="submit"
+        size="lg"
+        disabled={disabled || value.trim() === ""}
+        aria-label="Send"
+      >
+        <Send />
         Send
       </Button>
     </form>

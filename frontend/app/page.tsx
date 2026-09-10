@@ -2,6 +2,8 @@
 
 import { useEffect, useRef, useState } from "react";
 
+import { SquarePen } from "lucide-react";
+
 import { ChatComposer } from "@/components/ChatComposer";
 import { DocumentUpload } from "@/components/DocumentUpload";
 import { MessageBubble } from "@/components/MessageBubble";
@@ -68,6 +70,7 @@ export default function Home() {
             onClick={newConversation}
             disabled={loading || messages.length === 0}
           >
+            <SquarePen />
             New conversation
           </Button>
         </div>

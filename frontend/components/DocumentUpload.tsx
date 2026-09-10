@@ -2,6 +2,8 @@
 
 import { useRef, useState } from "react";
 
+import { Upload } from "lucide-react";
+
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { ingestDocument } from "@/lib/api";
@@ -60,6 +62,7 @@ export function DocumentUpload() {
             onClick={handleUpload}
             disabled={!file || state === "uploading"}
           >
+            <Upload />
             {state === "uploading" ? "Uploading…" : "Upload"}
           </Button>
         </div>
