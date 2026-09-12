@@ -349,6 +349,11 @@ def _retrieve(
     question didn't erode its score against the prior-turn-alone query by
     more than `MAX_AUGMENTED_SCORE_DROP`: a large drop means the question
     is pulling away from the old topic, not continuing it.
+
+    The prior-turn-alone query (a third embedding + Chroma round trip) is
+    only run when something actually needs it — i.e. the augmented query
+    found at least one chunk not already bare-relevant. A self-contained
+    new question, the common case, never pays for it.
     """
     bare_results = vector_store.query(question, top_k=top_k)
 
@@ -362,10 +367,19 @@ def _retrieve(
     augmented_results = vector_store.query(
         f"{last_user}\n{question}", top_k=top_k
     )
-    prev_turn_scores = {
-        r["id"]: r["score"]
-        for r in vector_store.query(last_user, top_k=top_k)
-    }
+
+    # The reference query is a third embedding + Chroma round trip, so skip
+    # it unless something actually needs checking against it — the common
+    # case of a self-contained new question already has all its augmented
+    # matches covered by bare_relevant_ids.
+    needs_prev_turn_check = any(
+        r["id"] not in bare_relevant_ids for r in augmented_results
+    )
+    prev_turn_scores = (
+        {r["id"]: r["score"] for r in vector_store.query(last_user, top_k=top_k)}
+        if needs_prev_turn_check
+        else {}
+    )
 
     merged: dict[str, dict] = {r["id"]: r for r in bare_results}
     for result in augmented_results:

@@ -407,8 +407,17 @@ def test_no_history_leaves_the_prompt_byte_identical():
     assert store_a.received_question == "What powers a cell?"
 
 
-def test_retrieval_runs_bare_augmented_and_prev_turn_queries():
-    store = FakeVectorStore(FIVE_RESULTS)
+def test_retrieval_runs_prev_turn_query_only_when_something_needs_it():
+    # The augmented query surfaces a chunk bare didn't confirm -> the
+    # reference (prior-turn-alone) query is needed to check it.
+    bridge = _result("The Meridian Bridge has two spans.", "bridge.md", 1, 0.60)
+    store = FakeVectorStore(
+        {
+            "and the second part?": [],
+            "How is the Meridian Bridge built?\nand the second part?": [bridge],
+            "How is the Meridian Bridge built?": [bridge],
+        }
+    )
 
     answer_question("and the second part?", store, history=TWO_TURNS)
 
@@ -420,6 +429,26 @@ def test_retrieval_runs_bare_augmented_and_prev_turn_queries():
         "and the second part?",
         "How is the Meridian Bridge built?\nand the second part?",
         "How is the Meridian Bridge built?",
+    ]
+
+
+def test_prev_turn_query_is_skipped_when_augmented_adds_nothing_new():
+    # Every augmented result is already bare-relevant -> the third query
+    # (an extra embedding + Chroma round trip) would be pure overhead, so
+    # it's never issued.
+    pto = _result("PTO accrues at 1.5 days per month.", "hr.md", 3, 0.71)
+    store = FakeVectorStore(
+        {
+            "How much PTO do I get?": [pto],
+            "How is the Meridian Bridge built?\nHow much PTO do I get?": [pto],
+        }
+    )
+
+    answer_question("How much PTO do I get?", store, history=TWO_TURNS)
+
+    assert store.received_queries == [
+        "How much PTO do I get?",
+        "How is the Meridian Bridge built?\nHow much PTO do I get?",
     ]
 
 
@@ -439,7 +468,6 @@ def test_bare_query_results_are_always_trusted_alongside_augmented():
         {
             "How much PTO do I get?": [pto],
             "How is the Meridian Bridge built?\nHow much PTO do I get?": [pto],
-            "How is the Meridian Bridge built?": [],
         }
     )
 
