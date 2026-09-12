@@ -1,6 +1,7 @@
 import pytest
 
 from app.retrieval.query_flow import (
+    MAX_AUGMENTED_SCORE_DROP,
     MAX_HISTORY_MESSAGES,
     MIN_RELEVANCE_SCORE,
     NO_CONTEXT_ANSWER,
@@ -59,6 +60,15 @@ FIVE_RESULTS = [
     _result("Compound interest compounds over time.", "finance.md", 1, 0.22),
     _result("A binary search tree is ordered.", "cs.md", 3, 0.18),
 ]
+
+
+def test_relevance_constants_match_the_documented_measurements():
+    # Pins today's values so a future change is a deliberate diff, not a
+    # silent drift. See the module docstring for the measurements behind
+    # both (2026-09-12: raised the floor after manual testing found 0.15
+    # let surface-similarity noise through as citations).
+    assert MIN_RELEVANCE_SCORE == 0.25
+    assert MAX_AUGMENTED_SCORE_DROP == 0.15
 
 
 def test_prompt_and_citations_when_relevant_chunks_exist():
@@ -243,6 +253,99 @@ def test_end_to_end_with_a_real_vector_store(tmp_path):
     assert "How do cells produce energy?" in result["prompt"]
 
 
+@pytest.mark.model
+def test_end_to_end_unrelated_question_after_history_has_no_context(tmp_path):
+    """Regression test for the exact bug report: a substantive history
+    topic must not leak citations when the new question has nothing to do
+    with it (or with anything else in the store)."""
+    store = VectorStore(tmp_path)
+    store.add_documents(
+        [
+            "The Meridian Bridge renovation replaced the original steel "
+            "trusses and added a pedestrian walkway on the lower deck, "
+            "completed in 2019."
+        ],
+        source="bridge.md",
+    )
+    history = [
+        {
+            "role": "user",
+            "content": "Tell me about the Meridian Bridge renovation",
+        },
+        {
+            "role": "assistant",
+            "content": "It replaced the trusses and added a walkway, "
+            "finished in 2019 [1].",
+        },
+    ]
+
+    result = answer_question(
+        "What is the capital of France?", store, history=history
+    )
+
+    assert result["has_context"] is False
+    assert result["citations"] == []
+
+
+@pytest.mark.model
+def test_end_to_end_genuine_followup_still_finds_the_history_topic(tmp_path):
+    """The fix for the bug above must not regress the feature it's a part
+    of: a content-free follow-up should still retrieve the prior topic."""
+    store = VectorStore(tmp_path)
+    store.add_documents(
+        [
+            "The Meridian Bridge's first span opened in 1932 carrying "
+            "rail traffic across the river.",
+            "The second span was added in 1961 to carry automobile "
+            "traffic alongside the original rail span.",
+        ],
+        source="bridge.md",
+    )
+    history = [
+        {
+            "role": "user",
+            "content": "When did the first span of the Meridian Bridge open?",
+        },
+        {"role": "assistant", "content": "The first span opened in 1932 [1]."},
+    ]
+
+    result = answer_question(
+        "and the second part?", store, top_k=2, history=history
+    )
+
+    assert result["has_context"] is True
+    assert any("1961" in c["text"] for c in result["citations"])
+
+
+@pytest.mark.model
+def test_end_to_end_surface_similar_document_is_not_cited(tmp_path):
+    """Regression test for the too-permissive floor: measured at cosine
+    0.2056, a document sharing only generic vocabulary with the question
+    used to clear the old 0.15 floor and pollute the citations."""
+    store = VectorStore(tmp_path)
+    store.add_documents(
+        [
+            "To make a classic carbonara, cook pancetta until crisp, then "
+            "toss hot pasta with eggs, pecorino cheese, and black pepper "
+            "off the heat."
+        ],
+        source="recipe.md",
+    )
+    store.add_documents(
+        [
+            "Photosynthesis in plant chloroplasts converts light energy "
+            "into chemical energy, producing glucose and releasing oxygen "
+            "as a byproduct."
+        ],
+        source="biology.md",
+    )
+
+    result = answer_question("How do I make carbonara?", store, top_k=5)
+
+    sources = {c["source"] for c in result["citations"]}
+    assert sources == {"recipe.md"}
+
+
 def test_end_to_end_empty_real_store(tmp_path):
     # An empty store answers without embedding the question, so this needs
     # neither the model nor a download — keep it in the fast default run.
@@ -304,16 +407,19 @@ def test_no_history_leaves_the_prompt_byte_identical():
     assert store_a.received_question == "What powers a cell?"
 
 
-def test_retrieval_runs_both_the_bare_and_augmented_queries():
+def test_retrieval_runs_bare_augmented_and_prev_turn_queries():
     store = FakeVectorStore(FIVE_RESULTS)
 
     answer_question("and the second part?", store, history=TWO_TURNS)
 
-    # query 1: the question as-is; query 2: last *user* turn + question
-    # (the assistant turn is not used for retrieval)
+    # bare question, then (last user turn + question), then the last user
+    # turn alone — the third is a reference score, never shown to the user,
+    # used to tell a real complement from pure history carryover (the
+    # assistant turn is never used for retrieval).
     assert store.received_queries == [
         "and the second part?",
         "How is the Meridian Bridge built?\nand the second part?",
+        "How is the Meridian Bridge built?",
     ]
 
 
@@ -325,19 +431,15 @@ def test_no_history_runs_a_single_retrieval_query():
     assert store.received_queries == ["What powers a cell?"]
 
 
-def test_dual_retrieval_merges_results_from_both_queries():
-    # A self-contained new question on a different topic: its own chunks
-    # come from the bare query, the previous topic's from the augmented
-    # one — both should be considered, best score per chunk, top_k overall.
+def test_bare_query_results_are_always_trusted_alongside_augmented():
+    # Bare-query matches need no drop-check — the question itself, with no
+    # help from history, already justifies them.
     pto = _result("PTO accrues at 1.5 days per month.", "hr.md", 3, 0.71)
-    bridge = _result("The Meridian Bridge has two spans.", "bridge.md", 1, 0.66)
     store = FakeVectorStore(
         {
             "How much PTO do I get?": [pto],
-            "How is the Meridian Bridge built?\nHow much PTO do I get?": [
-                bridge,
-                pto,
-            ],
+            "How is the Meridian Bridge built?\nHow much PTO do I get?": [pto],
+            "How is the Meridian Bridge built?": [],
         }
     )
 
@@ -345,11 +447,99 @@ def test_dual_retrieval_merges_results_from_both_queries():
         "How much PTO do I get?", store, top_k=5, history=TWO_TURNS
     )
 
-    texts = {c["text"] for c in result["citations"]}
-    assert pto["text"] in texts  # not crowded out by the old topic
-    assert bridge["text"] in texts
-    # merged, ranked by score, no duplicate of pto
-    assert [c["text"] for c in result["citations"]] == [pto["text"], bridge["text"]]
+    assert [c["text"] for c in result["citations"]] == [pto["text"]]
+
+
+def test_augmented_only_chunk_kept_when_score_barely_drops_from_prev_turn():
+    # A real complement: the augmented query surfaces a chunk the bare
+    # query missed, and its score is close to what the prior turn alone
+    # gets for that same chunk (small drop) -> genuine relevance, kept.
+    bridge = _result("The Meridian Bridge has two spans.", "bridge.md", 1, 0.60)
+    bridge_prev_alone = _result(bridge["text"], "bridge.md", 1, 0.68)
+    store = FakeVectorStore(
+        {
+            "and the second part?": [],
+            "How is the Meridian Bridge built?\nand the second part?": [bridge],
+            "How is the Meridian Bridge built?": [bridge_prev_alone],
+        }
+    )
+
+    result = answer_question(
+        "and the second part?", store, top_k=5, history=TWO_TURNS
+    )
+
+    assert [c["text"] for c in result["citations"]] == [bridge["text"]]
+
+
+def test_augmented_only_chunk_dropped_when_score_falls_far_below_prev_turn():
+    # The bug: an augmented-only chunk whose score collapses once the new
+    # (unrelated) question is added is pure history carryover, not
+    # relevance to what was actually asked — must be rejected even though
+    # it clears MIN_RELEVANCE_SCORE on its own.
+    bridge = _result("The Meridian Bridge has two spans.", "bridge.md", 1, 0.52)
+    bridge_prev_alone = _result(bridge["text"], "bridge.md", 1, 0.76)
+    store = FakeVectorStore(
+        {
+            "What is the capital of France?": [],
+            "How is the Meridian Bridge built?\nWhat is the capital of France?": [
+                bridge
+            ],
+            "How is the Meridian Bridge built?": [bridge_prev_alone],
+        }
+    )
+
+    result = answer_question(
+        "What is the capital of France?", store, top_k=5, history=TWO_TURNS
+    )
+
+    assert result["citations"] == []
+    assert result["has_context"] is False
+
+
+def test_irrelevant_bare_presence_does_not_bypass_the_augmented_drop_check():
+    # Chroma always returns nearest neighbours for a non-empty store, so a
+    # chunk can appear in bare_results with an irrelevant score (e.g. it's
+    # the only document in a small store). That must not let an augmented
+    # score for the SAME chunk skip the drop-check just because the id
+    # already "existed" — this is what let bug 1 slip past the first fix.
+    bridge = _result("The Meridian Bridge has two spans.", "bridge.md", 1, 0.52)
+    bridge_bare = _result(bridge["text"], "bridge.md", 1, -0.01)
+    bridge_prev_alone = _result(bridge["text"], "bridge.md", 1, 0.76)
+    store = FakeVectorStore(
+        {
+            "What is the capital of France?": [bridge_bare],
+            "How is the Meridian Bridge built?\nWhat is the capital of France?": [
+                bridge
+            ],
+            "How is the Meridian Bridge built?": [bridge_prev_alone],
+        }
+    )
+
+    result = answer_question(
+        "What is the capital of France?", store, top_k=5, history=TWO_TURNS
+    )
+
+    assert result["citations"] == []
+    assert result["has_context"] is False
+
+
+def test_augmented_only_chunk_dropped_when_absent_from_prev_turn_results():
+    # Can't confirm it against the prior turn at all (didn't make that
+    # query's own top_k) -> don't let it through unchecked.
+    mystery = _result("Some chunk.", "x.md", 0, 0.9)
+    store = FakeVectorStore(
+        {
+            "and the second part?": [],
+            "How is the Meridian Bridge built?\nand the second part?": [mystery],
+            "How is the Meridian Bridge built?": [],  # mystery absent here
+        }
+    )
+
+    result = answer_question(
+        "and the second part?", store, top_k=5, history=TWO_TURNS
+    )
+
+    assert result["citations"] == []
 
 
 def test_empty_question_with_history_still_raises_value_error():

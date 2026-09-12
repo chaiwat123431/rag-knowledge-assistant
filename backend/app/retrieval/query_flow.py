@@ -28,12 +28,20 @@ just inflate the prompt.
 
 Retrieval also uses history. A bare follow-up like "and the second part?"
 has no topical content of its own — retrieved alone it finds nothing. So
-when there's history we retrieve *twice*: once for the current question
-as-is, and once for (last user turn + current question), then merge the
-two result sets (best score wins per chunk) and take the top `top_k`.
-That way a self-contained new question on a different topic still gets its
-own chunks, and a context-dependent follow-up still gets the subject's.
-Assistant turns are not used for retrieval (long, carry the model's own
+when there's a prior user turn we also try (that turn + the current
+question) and merge in whatever it finds. That alone is not safe, though:
+concatenating an unrelated new question onto a substantive prior topic
+still scores well against that topic's own chunks, because the combined
+embedding is dominated by the (real, long) prior turn — measured at
+cosine ~0.52 for a totally unrelated question, versus ~0.0 for the bare
+question alone. So an augmented-only match is trusted only if adding the
+current question didn't erode its score against the prior-turn-alone
+query by more than `MAX_AUGMENTED_SCORE_DROP` — a large drop means the new
+question is pulling away from the old topic (measured: -0.19 to -0.28 for
+genuinely unrelated follow-ups, versus -0.03 to -0.07 for real
+context-dependent ones — a clean, wide gap). Chunks that clear the floor
+via the bare query need no such check; the question itself justifies them.
+Assistant turns are never used for retrieval (long, carry the model's own
 phrasing). No LLM-based query rewriting — this is the MVP heuristic.
 
 Prompt shape
@@ -62,8 +70,15 @@ same as an empty store: `has_context` False, empty `citations`, and a
 "no information" prompt. `top_k` is therefore a retrieval cap, not a
 guarantee — you can ask for 5 and get 2 citations, or 0.
 
-The floor is a heuristic; revisit it once retrieval quality is actually
-measured (same caveat as the chunker's char-based sizing).
+The floor was revisited (2026-09-12) after manual testing found it too
+permissive with several documents in the store: measured across 6
+topically-distinct documents x 6 matching questions, correct-document
+scores landed at 0.55-0.78 while surface-noise scores from unrelated
+documents mostly stayed under 0.12 but spiked as high as 0.21 (e.g. a
+"binary search tree" chunk scoring 0.18-0.21 against unrelated biology
+questions, just from generic phrasing overlap). 0.15 sat inside that noise
+band; 0.25 sits in the wide gap above every measured false positive and
+below every measured true positive.
 """
 
 import re
@@ -71,10 +86,16 @@ import re
 from app.retrieval.llm import DEFAULT_MODEL, generate_answer
 from app.retrieval.vector_store import VectorStore
 
-# Cosine similarity below this is treated as "not really about this".
-# MiniLM puts genuinely unrelated short passages well under 0.15;
-# related-but-different material sits above it.
-MIN_RELEVANCE_SCORE = 0.15
+# Cosine similarity below this is treated as "not really about this". See
+# "Relevance floor" above for the measurements behind 0.25 (raised from an
+# earlier 0.15 that let surface-similarity noise through as citations).
+MIN_RELEVANCE_SCORE = 0.25
+
+# How much an augmented-query chunk's score is allowed to drop relative to
+# the previous-user-turn-alone score before it's treated as pure history
+# carryover rather than a real match to the current question. See
+# "Retrieval also uses history" above for the measurements behind 0.15.
+MAX_AUGMENTED_SCORE_DROP = 0.15
 
 # Returned as the answer when retrieval found nothing relevant — no point
 # spending an LLM round-trip to have it say the same thing.
@@ -151,22 +172,16 @@ def _validate_history(history) -> list[dict]:
     return history
 
 
-def _retrieval_queries(question: str, history: list[dict]) -> list[str]:
-    """The text(s) to embed for retrieval.
+def _last_user_turn(history: list[dict]) -> str | None:
+    """The most recent *user* message in `history`, or None.
 
-    Always the current question as-is. If there's a prior *user* turn,
-    also (that turn + the question), so a context-dependent follow-up
-    ("and the second part?") still retrieves the subject. Assistant turns
-    are excluded on purpose. The caller runs each and merges the results.
+    Assistant turns are never used to drive retrieval (long, carry the
+    model's own phrasing).
     """
-    queries = [question]
-    last_user = next(
+    return next(
         (m["content"] for m in reversed(history) if m["role"] == "user"),
         None,
     )
-    if last_user:
-        queries.append(f"{last_user}\n{question}")
-    return queries
 
 
 _CITATION_MARKER_RE = re.compile(r"\s*\[\d+\]")
@@ -298,9 +313,7 @@ def answer_question(
 
     trimmed = _validate_history(history)[-MAX_HISTORY_MESSAGES:]
 
-    results = _retrieve(
-        vector_store, _retrieval_queries(question, trimmed), top_k
-    )
+    results = _retrieve(vector_store, question, trimmed, top_k, min_score)
     relevant = [r for r in results if _is_relevant(r, min_score)]
 
     return {
@@ -315,22 +328,62 @@ def answer_question(
 
 
 def _retrieve(
-    vector_store: VectorStore, queries: list[str], top_k: int
+    vector_store: VectorStore,
+    question: str,
+    history: list[dict],
+    top_k: int,
+    min_score: float,
 ) -> list[dict]:
-    """Run each query, merge results (best score per chunk), return top_k."""
-    if len(queries) == 1:
-        return vector_store.query(queries[0], top_k=top_k)
+    """Retrieve for `question`, folding in a history-augmented query
+    without letting it manufacture false relevance from the prior topic
+    alone (see "Retrieval also uses history" in the module docstring).
 
-    best: dict[str, dict] = {}
-    for query in queries:
-        for result in vector_store.query(query, top_k=top_k):
-            existing = best.get(result["id"])
-            if existing is None or result["score"] > existing["score"]:
-                best[result["id"]] = result
+    A chunk is trusted at face value if the *bare* question alone clears
+    `min_score` for it. Note this is stricter than merely "present in
+    `bare_results`": Chroma always returns its nearest neighbours for a
+    non-empty store, so a chunk can appear there with an irrelevant score
+    (e.g. a lone unrelated document, matched by default) — that's not
+    bare-question relevance, and must not let an augmented-query score for
+    the same chunk skip the check below. Everything else — augmented-only,
+    or bare-present but below the floor — is trusted only if the current
+    question didn't erode its score against the prior-turn-alone query by
+    more than `MAX_AUGMENTED_SCORE_DROP`: a large drop means the question
+    is pulling away from the old topic, not continuing it.
+    """
+    bare_results = vector_store.query(question, top_k=top_k)
 
-    ranked = sorted(
-        best.values(), key=lambda r: r["score"], reverse=True
+    last_user = _last_user_turn(history)
+    if last_user is None:
+        return bare_results
+
+    bare_relevant_ids = {
+        r["id"] for r in bare_results if _is_relevant(r, min_score)
+    }
+    augmented_results = vector_store.query(
+        f"{last_user}\n{question}", top_k=top_k
     )
+    prev_turn_scores = {
+        r["id"]: r["score"]
+        for r in vector_store.query(last_user, top_k=top_k)
+    }
+
+    merged: dict[str, dict] = {r["id"]: r for r in bare_results}
+    for result in augmented_results:
+        if result["id"] in bare_relevant_ids:
+            if result["score"] > merged[result["id"]]["score"]:
+                merged[result["id"]] = result
+            continue
+
+        prev_score = prev_turn_scores.get(result["id"])
+        if prev_score is None:
+            # Not confirmed against the prior turn either -> can't tell
+            # whether it's carryover; don't let it in unchecked.
+            continue
+        if prev_score - result["score"] > MAX_AUGMENTED_SCORE_DROP:
+            continue
+        merged[result["id"]] = result
+
+    ranked = sorted(merged.values(), key=lambda r: r["score"], reverse=True)
     return ranked[:top_k]
 
 
