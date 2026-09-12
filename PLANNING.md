@@ -101,6 +101,11 @@ rag-assistant/
   - Prompt: "Conversation so far:" block between instructions and Context; last `MAX_HISTORY_MESSAGES` (6) kept; our `[n]` markers stripped from prior assistant turns
   - Retrieval runs two queries (bare question + last-user-turn-augmented) and merges — a follow-up like "and the second part?" still retrieves the subject, a self-contained new question keeps its own chunks
   - `history=None`/`[]` is byte-identical to before; malformed history -> `InvalidHistoryError` -> 400
+- [x] Relevance fixes from manual UI testing (`query_flow.py` + tests) — `feature/relevance-fixes`, PR #10
+  - **Bug 1**: an unrelated new question after a substantive history topic returned `has_context=True` with stale citations — the augmented (history + question) query alone can't tell "genuine follow-up" from "history carryover", since concatenating any question onto a real prior topic still scores well against that topic's chunks (measured cosine ~0.52 for a totally unrelated question). Fixed with a 3rd reference-only query (prior turn alone): an augmented-only match is trusted only if the current question didn't erode its score against that reference by more than `MAX_AUGMENTED_SCORE_DROP` (0.15) — measured -0.19 to -0.28 drop for genuinely unrelated questions vs -0.03 to -0.07 for real follow-ups, a wide gap.
+  - **Bug 2**: `MIN_RELEVANCE_SCORE` raised `0.15` -> `0.25` — measured across 6 documents x 6 questions, true positives land at 0.55-0.78, surface-noise false positives spike as high as 0.21; 0.15 sat inside that noise band.
+  - Regression tests include the exact bug-1 repro (Meridian Bridge history + unrelated "capital of France?" question) against a real embedded `VectorStore`, plus a real-embedding check that genuine follow-ups still work.
+  - `/code-review` follow-up: the 3rd (reference-only) query is now skipped whenever every augmented result is already confirmed via the bare query — the common case of a self-contained new question — instead of always paying for a third embedding + Chroma round trip.
 - [ ] Frontend (Phase 3)
   - [x] Scaffold (`frontend/`, Next.js 16 App Router + TS + Tailwind v4) — `feature/frontend-scaffold`, PR #8
     - single `app/page.tsx`: file upload -> `POST /documents`; chat (input + Send) -> `POST /query` with `history`; citations under each answer; "Thinking…" indicator; errors shown, not thrown
