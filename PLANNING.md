@@ -120,6 +120,11 @@ rag-assistant/
     - `components/`: `DocumentUpload` (owns its upload state), `MessageBubble`, `Citations`, `ChatComposer`; `lib/chat.ts` = `Message` view type + `errorText`
     - "New conversation" clears chat state (frontend only); lucide icons on the action buttons
     - `lib/api.ts` unchanged — presentation refactor only
+  - [x] UI fixes: upload card layout + EN/FR toggle — `feature/ui-fixes`, PR #13
+    - `DocumentUpload`: native `<input type=file>` (intrinsic width, left a large empty gap) swapped for the shadcn `Input` primitive with `flex-1`, button right-aligned — consistent with `ChatComposer`
+    - EN/FR toggle for static UI labels only (not the LLM's answer language, which already adapts to the question): `lib/i18n.ts` (plain object dictionaries, no next-intl — one page, ~18 short strings), `lib/language-context.tsx` (Context + `localStorage`, `<html lang>` synced via effect), `components/LanguageToggle.tsx` in the header
+    - Known, documented limitation: a returning user briefly sees English before the stored preference loads (no cookie/middleware — out of scope for a client-only toggle); accepted over a hydration-mismatch warning
+    - `Citations`/`MessageBubble` now `"use client"` (they read the language context) — no behavior change, their only caller was already client-side
   - [ ] Polish (later): streaming answers, mobile layout, per-message retry
   - **Note on stack:** planned as "Next.js 14+"; `create-next-app@latest` installed 16.3 (Turbopack default, Tailwind v4, React 19).
 
