@@ -17,8 +17,18 @@ import { cn } from "cn";
 
 export function ConversationHistory({
   onLoad,
+  onDeleteActive,
+  disabled = false,
 }: {
   onLoad: (messages: Message[]) => void;
+  /** Called when the conversation currently shown on screen is the one
+   * just deleted — the caller owns `messages`, so only it can clear the
+   * displayed transcript. Without this, deleting the active conversation
+   * would leave its content on screen, and sending a new message would
+   * resurrect it under a new id (syncActive sees a null active id and
+   * creates a fresh entry seeded with those stale, "deleted" messages). */
+  onDeleteActive: () => void;
+  disabled?: boolean;
 }) {
   const { t } = useLanguage();
   const { conversations, activeId, loadConversation, deleteConversation } =
@@ -31,10 +41,16 @@ export function ConversationHistory({
     setOpen(false);
   }
 
+  function handleDelete(id: string) {
+    const wasActive = id === activeId;
+    deleteConversation(id);
+    if (wasActive) onDeleteActive();
+  }
+
   return (
-    <Popover open={open} onOpenChange={setOpen}>
+    <Popover open={disabled ? false : open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
-        <Button variant="ghost" size="sm">
+        <Button variant="ghost" size="sm" disabled={disabled}>
           <History />
           {t.history}
         </Button>
@@ -66,7 +82,7 @@ export function ConversationHistory({
                 <button
                   type="button"
                   aria-label={t.deleteConversation}
-                  onClick={() => deleteConversation(conversation.id)}
+                  onClick={() => handleDelete(conversation.id)}
                   className="absolute top-1/2 right-1 -translate-y-1/2 rounded p-1 text-muted-foreground opacity-0 hover:text-foreground focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-ring group-hover:opacity-100"
                 >
                   <X className="size-3.5" />

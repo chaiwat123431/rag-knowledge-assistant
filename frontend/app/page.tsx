@@ -28,13 +28,17 @@ export default function Home() {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, loading]);
 
+  function clearActiveView() {
+    setMessages([]);
+    setInput("");
+    setError(null);
+  }
+
   function newConversation() {
     // By the time this is clickable (disabled while messages is empty),
     // syncActive has already persisted the current conversation on every
     // message exchanged — nothing left to save, just detach from it.
-    setMessages([]);
-    setInput("");
-    setError(null);
+    clearActiveView();
     startNew();
   }
 
@@ -90,7 +94,17 @@ export default function Home() {
           <h1 className="text-sm font-semibold">{t.appTitle}</h1>
           <div className="flex items-center gap-1">
             <LanguageToggle />
-            <ConversationHistory onLoad={handleLoadConversation} />
+            <ConversationHistory
+              onLoad={handleLoadConversation}
+              onDeleteActive={clearActiveView}
+              // Switching or deleting a conversation while a request for
+              // the currently active one is in flight would let its
+              // response land on whatever conversation is active by the
+              // time it resolves, not the one that sent it — disable
+              // browsing history until the request settles, same as
+              // "New conversation" already does.
+              disabled={loading}
+            />
             <Button
               variant="ghost"
               size="sm"
