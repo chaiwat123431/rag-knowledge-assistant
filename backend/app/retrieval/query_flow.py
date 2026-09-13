@@ -36,13 +36,26 @@ embedding is dominated by the (real, long) prior turn — measured at
 cosine ~0.52 for a totally unrelated question, versus ~0.0 for the bare
 question alone. So an augmented-only match is trusted only if adding the
 current question didn't erode its score against the prior-turn-alone
-query by more than `MAX_AUGMENTED_SCORE_DROP` — a large drop means the new
-question is pulling away from the old topic (measured: -0.19 to -0.28 for
-genuinely unrelated follow-ups, versus -0.03 to -0.07 for real
-context-dependent ones — a clean, wide gap). Chunks that clear the floor
-via the bare query need no such check; the question itself justifies them.
-Assistant turns are never used for retrieval (long, carry the model's own
-phrasing). No LLM-based query rewriting — this is the MVP heuristic.
+query by more than `MAX_AUGMENTED_SCORE_DROP_RATIO`, a *fraction of the
+prior-turn score* — not a fixed absolute amount (see below for why) — a
+large relative drop means the new question is pulling away from the old
+topic (measured: 20-37% relative drop for genuinely unrelated questions,
+versus at most ~10% for real context-dependent ones — a clean gap).
+Chunks that clear the floor via the bare query need no such check; the
+question itself justifies them. Assistant turns are never used for
+retrieval (long, carry the model's own phrasing). No LLM-based query
+rewriting — this is the MVP heuristic.
+
+The drop check was fixed to be relative, not absolute, after a real recurrence
+(2026-09-13): a longer document chunks into pieces with different baseline
+similarity to the prior turn (e.g. a chunk central to "the renovation" at
+prev_score 0.77, versus a peripheral one about unrelated maintenance
+details at prev_score 0.44). A flat absolute-drop threshold let the
+weakly-anchored chunk through — its drop (0.11) looked "safe" only because
+it started lower, even though *proportionally* it lost as much ground
+(26%) as the strongly-anchored chunk that was correctly rejected (20%).
+Measuring the drop as a fraction of the prior-turn score treats chunks
+with different baseline similarity consistently.
 
 Prompt shape
 ------------
@@ -91,11 +104,13 @@ from app.retrieval.vector_store import VectorStore
 # earlier 0.15 that let surface-similarity noise through as citations).
 MIN_RELEVANCE_SCORE = 0.25
 
-# How much an augmented-query chunk's score is allowed to drop relative to
-# the previous-user-turn-alone score before it's treated as pure history
-# carryover rather than a real match to the current question. See
-# "Retrieval also uses history" above for the measurements behind 0.15.
-MAX_AUGMENTED_SCORE_DROP = 0.15
+# How much of an augmented-query chunk's score against the previous-turn-
+# alone query it's allowed to lose, as a FRACTION of that prior-turn score
+# (not a fixed absolute amount — see "Retrieval also uses history" above
+# for why that broke on a real multi-chunk document), before it's treated
+# as pure history carryover rather than a real match to the current
+# question. See that section for the measurements behind 0.15.
+MAX_AUGMENTED_SCORE_DROP_RATIO = 0.15
 
 # Returned as the answer when retrieval found nothing relevant — no point
 # spending an LLM round-trip to have it say the same thing.
@@ -347,8 +362,11 @@ def _retrieve(
     the same chunk skip the check below. Everything else — augmented-only,
     or bare-present but below the floor — is trusted only if the current
     question didn't erode its score against the prior-turn-alone query by
-    more than `MAX_AUGMENTED_SCORE_DROP`: a large drop means the question
-    is pulling away from the old topic, not continuing it.
+    more than `MAX_AUGMENTED_SCORE_DROP_RATIO` *of that prior-turn score*
+    (a fraction, not a fixed amount — chunks only weakly anchored to the
+    prior turn need to lose much less in absolute terms to reveal they're
+    unrelated to the new question too). A large relative drop means the
+    question is pulling away from the old topic, not continuing it.
 
     The prior-turn-alone query (a third embedding + Chroma round trip) is
     only run when something actually needs it — i.e. the augmented query
@@ -389,11 +407,14 @@ def _retrieve(
             continue
 
         prev_score = prev_turn_scores.get(result["id"])
-        if prev_score is None:
-            # Not confirmed against the prior turn either -> can't tell
-            # whether it's carryover; don't let it in unchecked.
+        if prev_score is None or prev_score <= 0:
+            # Not confirmed against the prior turn either (can't tell
+            # whether it's carryover), or the prior turn itself had no
+            # positive affinity to this chunk (no meaningful baseline to
+            # measure a relative drop against) -> don't let it in unchecked.
             continue
-        if prev_score - result["score"] > MAX_AUGMENTED_SCORE_DROP:
+        relative_drop = (prev_score - result["score"]) / prev_score
+        if relative_drop > MAX_AUGMENTED_SCORE_DROP_RATIO:
             continue
         merged[result["id"]] = result
 
