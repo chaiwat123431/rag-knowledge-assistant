@@ -6,12 +6,15 @@ import { SquarePen } from "lucide-react";
 
 import { ChatComposer } from "@/components/ChatComposer";
 import { DocumentUpload } from "@/components/DocumentUpload";
+import { LanguageToggle } from "@/components/LanguageToggle";
 import { MessageBubble } from "@/components/MessageBubble";
 import { Button } from "@/components/ui/button";
 import { askQuestion, type HistoryMessage } from "@/lib/api";
 import { errorText, type Message } from "@/lib/chat";
+import { useLanguage } from "@/lib/language-context";
 
 export default function Home() {
+  const { t } = useLanguage();
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
@@ -50,7 +53,7 @@ export default function Home() {
         { role: "assistant", content: res.answer, citations: res.citations },
       ]);
     } catch (err) {
-      setError(errorText(err));
+      setError(errorText(err, t));
       // roll the optimistic question back so a retry starts clean
       setMessages((prev) => prev.slice(0, -1));
       setInput(question);
@@ -63,16 +66,19 @@ export default function Home() {
     <div className="flex flex-1 flex-col">
       <header className="sticky top-0 z-10 border-b border-border bg-background/80 backdrop-blur">
         <div className="mx-auto flex max-w-3xl items-center justify-between px-4 py-3">
-          <h1 className="text-sm font-semibold">RAG Assistant</h1>
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={newConversation}
-            disabled={loading || messages.length === 0}
-          >
-            <SquarePen />
-            New conversation
-          </Button>
+          <h1 className="text-sm font-semibold">{t.appTitle}</h1>
+          <div className="flex items-center gap-1">
+            <LanguageToggle />
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={newConversation}
+              disabled={loading || messages.length === 0}
+            >
+              <SquarePen />
+              {t.newConversation}
+            </Button>
+          </div>
         </div>
       </header>
 
@@ -81,9 +87,7 @@ export default function Home() {
 
         <div className="flex flex-1 flex-col gap-5">
           {messages.length === 0 && (
-            <p className="text-sm text-muted-foreground">
-              No messages yet. Upload a document, then ask something about it.
-            </p>
+            <p className="text-sm text-muted-foreground">{t.emptyState}</p>
           )}
 
           {messages.map((message, i) => (
@@ -92,7 +96,7 @@ export default function Home() {
 
           {loading && (
             <p className="text-sm text-muted-foreground">
-              Thinking… <span className="text-xs">(the local model can take a few seconds)</span>
+              {t.thinking} <span className="text-xs">{t.thinkingHint}</span>
             </p>
           )}
           {error && <p className="text-sm text-destructive">{error}</p>}
