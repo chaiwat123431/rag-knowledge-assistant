@@ -30,6 +30,11 @@ const en = {
   uploadFailed: (detail: string) => `Upload failed — ${detail}`,
   sources: (count: number) => `Sources (${count})`,
   chunkLabel: (index: number) => `chunk ${index}`,
+  history: "History",
+  savedConversations: (count: number) => `Saved conversations (${count})`,
+  noSavedConversations: "No saved conversations yet.",
+  deleteConversation: "Delete conversation",
+  untitledConversation: "Untitled conversation",
 } as const;
 
 // Widen `en`'s literal string/function types to a plain shape (string, or
@@ -68,6 +73,11 @@ const fr: Dict = {
   uploadFailed: (detail: string) => `Échec de l'import — ${detail}`,
   sources: (count: number) => `Sources (${count})`,
   chunkLabel: (index: number) => `extrait ${index}`,
+  history: "Historique",
+  savedConversations: (count: number) => `Conversations enregistrées (${count})`,
+  noSavedConversations: "Aucune conversation enregistrée pour l'instant.",
+  deleteConversation: "Supprimer la conversation",
+  untitledConversation: "Conversation sans titre",
 };
 
 export const translations: Record<Language, Dict> = { en, fr };
