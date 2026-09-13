@@ -22,7 +22,12 @@ const LanguageContext = createContext<LanguageContextValue | null>(null);
 
 export function LanguageProvider({ children }: { children: ReactNode }) {
   // Default "en" on the server and on first client render (SSR-safe), then
-  // sync from localStorage once mounted.
+  // sync from localStorage once mounted. This means a returning French
+  // user briefly sees English on load (no cookie/middleware to let the
+  // server render the right language from the start — out of scope for a
+  // client-only preference toggle); accepted, documented trade-off rather
+  // than the alternative of a React hydration-mismatch warning from
+  // reading localStorage during the initial render.
   const [language, setLanguageState] = useState<Language>("en");
 
   useEffect(() => {
@@ -41,6 +46,14 @@ export function LanguageProvider({ children }: { children: ReactNode }) {
       // localStorage unavailable (private mode, etc.) — stay on the default.
     }
   }, []);
+
+  // Keep <html lang> in sync so screen readers and translation tools apply
+  // the right language once it's known (WCAG 3.1.1). This can't cover the
+  // very first paint before the effect above resolves the stored
+  // preference — same inherent client-only-preference trade-off as above.
+  useEffect(() => {
+    document.documentElement.lang = language;
+  }, [language]);
 
   function setLanguage(next: Language) {
     setLanguageState(next);

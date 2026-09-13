@@ -9,15 +9,19 @@ export function LanguageToggle() {
   const { language, setLanguage, t } = useLanguage();
   const other = language === "en" ? "fr" : "en";
 
+  const label = other.toUpperCase();
+
   return (
     <Button
       variant="ghost"
       size="sm"
       onClick={() => setLanguage(other)}
-      aria-label={t.switchLanguage}
+      // The accessible name must contain the visible label ("EN"/"FR") per
+      // WCAG 2.5.3 (Label in Name), so voice-control ("click FR") matches.
+      aria-label={`${t.switchLanguage}: ${label}`}
     >
       <Languages />
-      {other.toUpperCase()}
+      {label}
     </Button>
   );
 }
