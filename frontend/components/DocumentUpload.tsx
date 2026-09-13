@@ -6,13 +6,16 @@ import { Upload } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
 import { ingestDocument } from "@/lib/api";
 import { errorText } from "@/lib/chat";
+import { useLanguage } from "@/lib/language-context";
 import { cn } from "cn";
 
 type UploadState = "idle" | "uploading" | "done" | "error";
 
 export function DocumentUpload() {
+  const { t } = useLanguage();
   const [file, setFile] = useState<File | null>(null);
   const [state, setState] = useState<UploadState>("idle");
   const [message, setMessage] = useState("");
@@ -21,31 +24,27 @@ export function DocumentUpload() {
   async function handleUpload() {
     if (!file || state === "uploading") return;
     setState("uploading");
-    setMessage(`Uploading ${file.name}…`);
+    setMessage(t.uploadingFile(file.name));
     try {
       const res = await ingestDocument(file);
       setState("done");
-      setMessage(
-        `Indexed “${res.source}” — ${res.chunks_added} chunk${
-          res.chunks_added === 1 ? "" : "s"
-        } added.`,
-      );
+      setMessage(t.uploadSuccess(res.source, res.chunks_added));
       setFile(null);
       if (inputRef.current) inputRef.current.value = "";
     } catch (err) {
       setState("error");
-      setMessage(`Upload failed — ${errorText(err)}`);
+      setMessage(t.uploadFailed(errorText(err, t)));
     }
   }
 
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Add a document</CardTitle>
+        <CardTitle>{t.addDocument}</CardTitle>
       </CardHeader>
       <CardContent className="flex flex-col gap-3">
-        <div className="flex flex-wrap items-center gap-3">
-          <input
+        <div className="flex items-center gap-3">
+          <Input
             ref={inputRef}
             type="file"
             accept=".pdf,.txt,.md"
@@ -54,7 +53,7 @@ export function DocumentUpload() {
               setState("idle");
               setMessage("");
             }}
-            className="text-sm text-muted-foreground file:mr-3 file:rounded-md file:border file:border-border file:bg-background file:px-2.5 file:py-1 file:text-sm file:text-foreground"
+            className="flex-1"
           />
           <Button
             type="button"
@@ -63,7 +62,7 @@ export function DocumentUpload() {
             disabled={!file || state === "uploading"}
           >
             <Upload />
-            {state === "uploading" ? "Uploading…" : "Upload"}
+            {state === "uploading" ? t.uploading : t.upload}
           </Button>
         </div>
         {message && (

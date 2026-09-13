@@ -4,6 +4,7 @@ import { Send } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { useLanguage } from "@/lib/language-context";
 
 interface ChatComposerProps {
   value: string;
@@ -18,6 +19,8 @@ export function ChatComposer({
   onSubmit,
   disabled,
 }: ChatComposerProps) {
+  const { t } = useLanguage();
+
   return (
     <form
       onSubmit={(e) => {
@@ -30,18 +33,18 @@ export function ChatComposer({
         value={value}
         onChange={(e) => onChange(e.target.value)}
         disabled={disabled}
-        placeholder="Ask about your documents…"
+        placeholder={t.askPlaceholder}
         className="h-9"
-        aria-label="Question"
+        aria-label={t.questionLabel}
       />
       <Button
         type="submit"
         size="lg"
         disabled={disabled || value.trim() === ""}
-        aria-label="Send"
+        aria-label={t.send}
       >
         <Send />
-        Send
+        {t.send}
       </Button>
     </form>
   );
