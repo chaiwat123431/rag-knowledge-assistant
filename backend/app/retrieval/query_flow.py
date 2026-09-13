@@ -337,12 +337,22 @@ def _drop_weak_cross_source_noise(
     """
     if len(relevant) <= 1:
         return relevant
-    top = max(relevant, key=lambda r: r["score"])
-    threshold = top["score"] * ratio_floor
+    # `relevant` is nearest-first (see _retrieve / VectorStore.query), so
+    # the first element is the top result.
+    top = relevant[0]
+    top_source = top.get("source")
+    top_score = top["score"]
+    if top_score <= 0:
+        # No positive baseline to measure a fraction against (and, for a
+        # negative top score, multiplying by ratio_floor would raise the
+        # bar above top itself — inverted). Nothing to safely compare.
+        return relevant
+    threshold = top_score * ratio_floor
     return [
         r
         for r in relevant
-        if r["source"] == top["source"] or r["score"] >= threshold
+        if (top_source is not None and r.get("source") == top_source)
+        or r["score"] >= threshold
     ]
 
 
@@ -475,8 +485,13 @@ def _retrieve(
     merged: dict[str, dict] = {r["id"]: r for r in bare_results}
     for result in augmented_results:
         if result["id"] in bare_relevant_ids:
-            if result["score"] > merged[result["id"]]["score"]:
-                merged[result["id"]] = result
+            # Already justified by the bare question alone — keep its bare
+            # score rather than the (often history-inflated) augmented one.
+            # A downstream cross-source comparison uses the top score in
+            # `relevant` as its reference; letting history pump up a
+            # bare-relevant chunk's score here would raise that bar for
+            # every *other* source, even ones the augmentation never
+            # touched (see MIN_CROSS_SOURCE_RATIO in the module docstring).
             continue
 
         prev_score = prev_turn_scores.get(result["id"])

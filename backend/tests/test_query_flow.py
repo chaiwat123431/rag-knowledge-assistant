@@ -224,6 +224,67 @@ def test_cross_source_ratio_can_be_overridden():
     }
 
 
+def test_history_augmentation_does_not_inflate_the_cross_source_reference():
+    # /code-review regression: history-driven augmentation can boost a
+    # bare-relevant chunk's score (e.g. it also matches the prior turn's
+    # topic). That boosted score must not become the "top" that an
+    # unrelated-to-history but independently bare-relevant *other* source
+    # is measured against — that source got no augmentation boost of its
+    # own and would be unfairly penalized for it.
+    bridge = _result("Renovation replaced cables.", "bridge.md", 0, 0.50)
+    bridge_augmented = _result(
+        "Renovation replaced cables.", "bridge.md", 0, 0.75
+    )
+    policy = _result("15 vacation days per year.", "policy.md", 0, 0.38)
+    question = "what happened during the renovation, and what is the vacation policy?"
+    store = FakeVectorStore(
+        {
+            question: [bridge, policy],
+            f"How is the Meridian Bridge built?\n{question}": [bridge_augmented],
+            "How is the Meridian Bridge built?": [bridge_augmented],
+        }
+    )
+
+    result = answer_question(question, store, history=TWO_TURNS)
+
+    sources = {c["source"] for c in result["citations"]}
+    assert sources == {"bridge.md", "policy.md"}
+    # the bare-relevant chunk keeps its bare score, not the inflated one
+    bridge_citation = next(c for c in result["citations"] if c["source"] == "bridge.md")
+    assert bridge_citation["score"] == pytest.approx(0.50)
+
+
+def test_cross_source_filter_treats_two_none_sources_as_different():
+    # Defensive edge case: source is normally always a non-empty string
+    # (VectorStore.add_documents validates it), but if it were ever
+    # missing for two genuinely different chunks, `None == None` must not
+    # be read as "same document" and bypass the filter.
+    top = _result("Built in 1887.", "lighthouse.md", 0, 0.83)
+    top_no_source = dict(top, source=None)
+    noise_no_source = _result("Constructed in 1958.", "bridge.md", 0, 0.29)
+    noise_no_source = dict(noise_no_source, source=None)
+    store = FakeVectorStore([top_no_source, noise_no_source])
+
+    result = answer_question("When was it built?", store)
+
+    assert len(result["citations"]) == 1
+    assert result["citations"][0]["text"] == top["text"]
+
+
+def test_cross_source_filter_skipped_when_top_score_is_non_positive():
+    # min_score is a public parameter; a caller could set it low enough to
+    # admit non-positive scores. threshold = top_score * ratio would then
+    # invert (a negative top makes the threshold *higher* than top itself,
+    # rejecting everything) -- skip the filter rather than risk that.
+    a = _result("Chunk A.", "a.md", 0, -0.05)
+    b = _result("Chunk B.", "b.md", 0, -0.10)
+    store = FakeVectorStore([a, b])
+
+    result = answer_question("q", store, min_score=-1.0)
+
+    assert {c["source"] for c in result["citations"]} == {"a.md", "b.md"}
+
+
 def test_min_score_can_be_overridden():
     store = FakeVectorStore(FIVE_RESULTS)  # scores 0.81 .. 0.18
 
