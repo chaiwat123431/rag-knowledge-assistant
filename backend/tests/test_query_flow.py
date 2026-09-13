@@ -1,7 +1,8 @@
 import pytest
 
+from app.ingestion.chunker import chunk_text
 from app.retrieval.query_flow import (
-    MAX_AUGMENTED_SCORE_DROP,
+    MAX_AUGMENTED_SCORE_DROP_RATIO,
     MAX_HISTORY_MESSAGES,
     MIN_RELEVANCE_SCORE,
     NO_CONTEXT_ANSWER,
@@ -66,9 +67,11 @@ def test_relevance_constants_match_the_documented_measurements():
     # Pins today's values so a future change is a deliberate diff, not a
     # silent drift. See the module docstring for the measurements behind
     # both (2026-09-12: raised the floor after manual testing found 0.15
-    # let surface-similarity noise through as citations).
+    # let surface-similarity noise through as citations. 2026-09-13: the
+    # drop check became a ratio of the prior-turn score, not an absolute
+    # amount, after a real multi-chunk-document recurrence of bug 1).
     assert MIN_RELEVANCE_SCORE == 0.25
-    assert MAX_AUGMENTED_SCORE_DROP == 0.15
+    assert MAX_AUGMENTED_SCORE_DROP_RATIO == 0.15
 
 
 def test_prompt_and_citations_when_relevant_chunks_exist():
@@ -276,6 +279,62 @@ def test_end_to_end_unrelated_question_after_history_has_no_context(tmp_path):
             "role": "assistant",
             "content": "It replaced the trusses and added a walkway, "
             "finished in 2019 [1].",
+        },
+    ]
+
+    result = answer_question(
+        "What is the capital of France?", store, history=history
+    )
+
+    assert result["has_context"] is False
+    assert result["citations"] == []
+
+
+@pytest.mark.model
+def test_end_to_end_multi_chunk_document_unrelated_question_has_no_context(
+    tmp_path,
+):
+    """Regression test for the recurrence found via manual UI testing after
+    the first fix: a longer, realistic document that the real chunker
+    splits into multiple chunks (unlike the single-chunk repro above) must
+    still not leak a citation for an unrelated new question. One of the
+    chunks here is only weakly anchored to the prior turn (prev_score
+    ~0.44) — the bug this test locks in is that an absolute drop threshold
+    let exactly that kind of chunk through."""
+    store = VectorStore(tmp_path)
+    document = (
+        "The Meridian Bridge is a suspension bridge completed in 1958, "
+        "spanning the Halden River and carrying both rail and vehicle "
+        "traffic between the eastern and western districts of the city. "
+        "At the time of its construction it was the longest suspension "
+        "span in the region and was designed by the engineering firm "
+        "Voss & Ardell.\n\n"
+        "The bridge underwent a major renovation in 2003, during which "
+        "the original suspension cables were replaced with high-tensile "
+        "steel cables rated for a 75-year lifespan. The renovation also "
+        "added reinforced concrete piers, updated lighting along the "
+        "main span, and a dedicated lane for cyclists on the lower "
+        "deck.\n\n"
+        "Maintenance inspections occur every two years, and the bridge "
+        "authority publishes traffic volume statistics annually. The "
+        "most recent inspection in 2024 found no structural issues "
+        "requiring immediate repair."
+    )
+    chunks = chunk_text(document)
+    assert len(chunks) > 1  # exercising the real chunker, not a hand-picked single chunk
+    store.add_documents(chunks, source="test-document.txt")
+
+    history = [
+        {
+            "role": "user",
+            "content": "When was the Meridian Bridge renovated?",
+        },
+        {
+            "role": "assistant",
+            "content": "The Meridian Bridge underwent a major renovation "
+            "in 2003, during which the original cables were replaced "
+            "with high-tensile steel cables rated for a 75-year "
+            "lifespan.",
         },
     ]
 
@@ -549,6 +608,52 @@ def test_irrelevant_bare_presence_does_not_bypass_the_augmented_drop_check():
 
     assert result["citations"] == []
     assert result["has_context"] is False
+
+
+def test_relative_drop_rejects_a_weakly_anchored_chunk_absolute_drop_would_keep():
+    # Regression test for the real recurrence: a chunk only weakly tied to
+    # the prior turn (low prev_score, e.g. a peripheral detail in a longer,
+    # multi-chunk document) needs to lose much less in absolute terms to
+    # reveal it's unrelated to the new question too. A flat absolute-drop
+    # threshold of 0.15 would have kept this (drop of 0.11); measuring the
+    # drop as a fraction of prev_score correctly rejects it (25% loss).
+    weak = _result("Bridge maintenance schedule details.", "bridge.md", 2, 0.33)
+    weak_prev_alone = _result(weak["text"], "bridge.md", 2, 0.44)
+    store = FakeVectorStore(
+        {
+            "What is the capital of France?": [],
+            "How is the Meridian Bridge built?\nWhat is the capital of France?": [
+                weak
+            ],
+            "How is the Meridian Bridge built?": [weak_prev_alone],
+        }
+    )
+
+    result = answer_question(
+        "What is the capital of France?", store, top_k=5, history=TWO_TURNS
+    )
+
+    assert result["citations"] == []
+    assert result["has_context"] is False
+
+
+def test_augmented_only_chunk_with_non_positive_prev_score_is_dropped():
+    # No meaningful baseline to measure a relative drop against.
+    weird = _result("Some chunk.", "x.md", 0, 0.9)
+    weird_prev_alone = _result(weird["text"], "x.md", 0, 0.0)
+    store = FakeVectorStore(
+        {
+            "and the second part?": [],
+            "How is the Meridian Bridge built?\nand the second part?": [weird],
+            "How is the Meridian Bridge built?": [weird_prev_alone],
+        }
+    )
+
+    result = answer_question(
+        "and the second part?", store, top_k=5, history=TWO_TURNS
+    )
+
+    assert result["citations"] == []
 
 
 def test_augmented_only_chunk_dropped_when_absent_from_prev_turn_results():
