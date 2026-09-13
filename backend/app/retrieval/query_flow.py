@@ -92,6 +92,45 @@ documents mostly stayed under 0.12 but spiked as high as 0.21 (e.g. a
 questions, just from generic phrasing overlap). 0.15 sat inside that noise
 band; 0.25 sits in the wide gap above every measured false positive and
 below every measured true positive.
+
+Cross-source noise (2026-09-13)
+--------------------------------
+A single higher absolute floor cannot fully separate signal from noise
+when documents are topically adjacent or merely share a sentence template
+("X was built by Y in Z"): measured with a Meridian Bridge doc and a
+Willowbrook Lighthouse doc in the same store, a bridge chunk scored 0.29
+against a lighthouse question — comfortably under a raised 0.35-0.40
+floor. But a harder, still realistic case (a *second, rival* lighthouse
+document — same domain, same date, "constructed by [name]") scored 0.45,
+which a 0.40 floor would still let through. There's no fixed absolute
+ceiling for this kind of noise; it scales with how topically close the
+unrelated document happens to be, which is unbounded.
+
+A plain threshold relative to the query's best score doesn't work either:
+it collides with the exact case it must not break. Two genuinely relevant
+chunks *from the same document* (e.g. a bridge's two spans, each
+answering half of "tell me about the bridge's spans") can legitimately
+score as low as 58% of the top chunk — almost identical to the 55% ratio
+measured for the hard rival-lighthouse case above. No single ratio
+separates "a weaker fact from the right document" from "a strong-ish
+match from the wrong one".
+
+The fix: the ratio floor (`MIN_CROSS_SOURCE_RATIO`) only applies to a
+result whose ``source`` differs from the top result's. Same-source
+results are exempt unconditionally — a document's own weaker supporting
+chunks are never pruned by this, regardless of ratio, which is what makes
+0.6 a safe choice: it clears the rival-lighthouse case (0.55) with margin,
+and a genuine multi-document question (each side of a compound question
+answered by a different document, measured at a 0.96 ratio) sails through
+untouched.
+
+This is a mitigation, not a guarantee: a cross-document match closer than
+0.6 to the top score — a near-duplicate topic phrased very similarly to
+the right answer — would still leak. No numeric threshold on a single
+cosine-similarity vector can rule that out; it would need re-ranking
+(a cross-encoder, hybrid BM25 + semantic scoring, or an LLM relevance
+check), which is out of scope for this MVP heuristic. Known limitation,
+not eliminated.
 """
 
 import re
@@ -111,6 +150,13 @@ MIN_RELEVANCE_SCORE = 0.25
 # as pure history carryover rather than a real match to the current
 # question. See that section for the measurements behind 0.15.
 MAX_AUGMENTED_SCORE_DROP_RATIO = 0.15
+
+# A relevant chunk from a DIFFERENT source than the top result must score
+# at least this fraction of the top result's score to survive; chunks
+# sharing the top result's source are exempt. See "Cross-source noise"
+# above for the measurements behind 0.6 and why the exemption is what
+# makes a ratio floor safe here.
+MIN_CROSS_SOURCE_RATIO = 0.6
 
 # Returned as the answer when retrieval found nothing relevant — no point
 # spending an LLM round-trip to have it say the same thing.
@@ -281,18 +327,48 @@ def _is_relevant(result: dict, min_score: float) -> bool:
     return score is not None and score >= min_score
 
 
+def _drop_weak_cross_source_noise(
+    relevant: list[dict], ratio_floor: float
+) -> list[dict]:
+    """Drop results from a source other than the top result's if their
+    score is below `ratio_floor` of the top score. Results sharing the top
+    result's source are never dropped here — see "Cross-source noise" in
+    the module docstring for why the exemption is what makes this safe.
+    """
+    if len(relevant) <= 1:
+        return relevant
+    # `relevant` is nearest-first (see _retrieve / VectorStore.query), so
+    # the first element is the top result.
+    top = relevant[0]
+    top_source = top.get("source")
+    top_score = top["score"]
+    if top_score <= 0:
+        # No positive baseline to measure a fraction against (and, for a
+        # negative top score, multiplying by ratio_floor would raise the
+        # bar above top itself — inverted). Nothing to safely compare.
+        return relevant
+    threshold = top_score * ratio_floor
+    return [
+        r
+        for r in relevant
+        if (top_source is not None and r.get("source") == top_source)
+        or r["score"] >= threshold
+    ]
+
+
 def answer_question(
     question: str,
     vector_store: VectorStore,
     top_k: int = 5,
     min_score: float = MIN_RELEVANCE_SCORE,
     history: list[dict] | None = None,
+    cross_source_ratio: float = MIN_CROSS_SOURCE_RATIO,
 ) -> dict:
     """Retrieve context for `question` and build an LLM-ready prompt.
 
     Does NOT call an LLM — that's a later step. This just runs retrieval,
-    drops chunks below the relevance floor, and assembles the prompt +
-    citation list.
+    drops chunks below the relevance floor (and weak cross-source noise),
+    and assembles the prompt + citation list.
 
     Args:
         question: the user's natural-language question.
@@ -306,6 +382,12 @@ def answer_question(
             (last user turn + question) whose results are merged in, and
             the last `MAX_HISTORY_MESSAGES` messages go into the prompt.
             `None` / `[]` behaves as before.
+        cross_source_ratio: after the floor, a result from a source other
+            than the top result's is also dropped unless it scores at
+            least this fraction of the top score. Results sharing the top
+            result's source are never affected. Defaults to
+            `MIN_CROSS_SOURCE_RATIO`. See "Cross-source noise" in the
+            module docstring.
 
     Returns:
         A dict with stable keys in both the found and not-found cases:
@@ -330,6 +412,7 @@ def answer_question(
 
     results = _retrieve(vector_store, question, trimmed, top_k, min_score)
     relevant = [r for r in results if _is_relevant(r, min_score)]
+    relevant = _drop_weak_cross_source_noise(relevant, cross_source_ratio)
 
     return {
         "question": question,
@@ -402,8 +485,13 @@ def _retrieve(
     merged: dict[str, dict] = {r["id"]: r for r in bare_results}
     for result in augmented_results:
         if result["id"] in bare_relevant_ids:
-            if result["score"] > merged[result["id"]]["score"]:
-                merged[result["id"]] = result
+            # Already justified by the bare question alone — keep its bare
+            # score rather than the (often history-inflated) augmented one.
+            # A downstream cross-source comparison uses the top score in
+            # `relevant` as its reference; letting history pump up a
+            # bare-relevant chunk's score here would raise that bar for
+            # every *other* source, even ones the augmentation never
+            # touched (see MIN_CROSS_SOURCE_RATIO in the module docstring).
             continue
 
         prev_score = prev_turn_scores.get(result["id"])
@@ -428,6 +516,7 @@ def answer_with_llm(
     top_k: int = 5,
     min_score: float = MIN_RELEVANCE_SCORE,
     history: list[dict] | None = None,
+    cross_source_ratio: float = MIN_CROSS_SOURCE_RATIO,
     *,
     generate=generate_answer,
     model: str = DEFAULT_MODEL,
@@ -435,8 +524,8 @@ def answer_with_llm(
     """Full pipeline: retrieve, build prompt, generate a grounded answer.
 
     Args:
-        question, vector_store, top_k, min_score, history: passed to
-            `answer_question`.
+        question, vector_store, top_k, min_score, history,
+        cross_source_ratio: passed to `answer_question`.
         generate: callable ``(prompt, model=...) -> str`` used to produce
             the answer. Defaults to `app.retrieval.llm.generate_answer`.
             This is the single seam for configuring or replacing the LLM:
@@ -467,6 +556,7 @@ def answer_with_llm(
         top_k=top_k,
         min_score=min_score,
         history=history,
+        cross_source_ratio=cross_source_ratio,
     )
 
     if retrieval["has_context"]:

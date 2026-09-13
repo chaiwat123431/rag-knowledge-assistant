@@ -4,6 +4,7 @@ from app.ingestion.chunker import chunk_text
 from app.retrieval.query_flow import (
     MAX_AUGMENTED_SCORE_DROP_RATIO,
     MAX_HISTORY_MESSAGES,
+    MIN_CROSS_SOURCE_RATIO,
     MIN_RELEVANCE_SCORE,
     NO_CONTEXT_ANSWER,
     InvalidHistoryError,
@@ -69,13 +70,27 @@ def test_relevance_constants_match_the_documented_measurements():
     # both (2026-09-12: raised the floor after manual testing found 0.15
     # let surface-similarity noise through as citations. 2026-09-13: the
     # drop check became a ratio of the prior-turn score, not an absolute
-    # amount, after a real multi-chunk-document recurrence of bug 1).
+    # amount, after a real multi-chunk-document recurrence of bug 1.
+    # 2026-09-13: added a cross-source ratio floor after manual testing
+    # found surface-similar sentences from an unrelated document could
+    # still clear the absolute floor).
     assert MIN_RELEVANCE_SCORE == 0.25
     assert MAX_AUGMENTED_SCORE_DROP_RATIO == 0.15
+    assert MIN_CROSS_SOURCE_RATIO == 0.6
 
 
 def test_prompt_and_citations_when_relevant_chunks_exist():
-    store = FakeVectorStore(FIVE_RESULTS)
+    # A dedicated fixture, not FIVE_RESULTS: the third (cross-source)
+    # result must itself clear MIN_CROSS_SOURCE_RATIO against the top
+    # score (0.55 / 0.81 = 0.68 >= 0.6) so this test exercises 3-way
+    # mixed-source rendering without tripping the cross-source filter
+    # that's the whole subject of the tests further down.
+    three_results = [
+        _result("Mitochondria produce ATP for the cell.", "biology.md", 2, 0.81),
+        _result("Photosynthesis makes glucose from sunlight.", "biology.md", 0, 0.74),
+        _result("The Bastille was stormed in 1789.", "history.md", 5, 0.55),
+    ]
+    store = FakeVectorStore(three_results)
 
     result = answer_question("How do cells make energy?", store, top_k=3)
 
@@ -83,9 +98,9 @@ def test_prompt_and_citations_when_relevant_chunks_exist():
     # the question is in the prompt
     assert "How do cells make energy?" in prompt
     # the text of each included chunk is in the prompt
-    for r in FIVE_RESULTS[:3]:
+    for r in three_results:
         assert r["text"] in prompt
-    # excluded chunks are not
+    # a chunk that was never offered is not
     assert FIVE_RESULTS[3]["text"] not in prompt
 
     # markers are 1..N in relevance order, each next to its source
@@ -103,7 +118,7 @@ def test_prompt_and_citations_when_relevant_chunks_exist():
         "history.md",
     ]
     assert [c["chunk_index"] for c in citations] == [2, 0, 5]
-    assert citations[0]["text"] == FIVE_RESULTS[0]["text"]
+    assert citations[0]["text"] == three_results[0]["text"]
     assert citations[0]["score"] == pytest.approx(0.81)
 
 
@@ -144,6 +159,130 @@ def test_only_results_above_the_floor_are_kept_and_renumbered():
     assert "Totally unrelated aside." not in result["prompt"]
     assert "[1] (source: biology.md, chunk 2)" in result["prompt"]
     assert "[2] (source: biology.md, chunk 7)" in result["prompt"]
+
+
+# --- cross-source noise (bridge/lighthouse "surface-similar sentence" bug) --
+
+
+def test_cross_source_result_below_ratio_floor_is_dropped():
+    # The reported bug, distilled: a chunk from a different source than
+    # the top result, scoring well above MIN_RELEVANCE_SCORE but far below
+    # MIN_CROSS_SOURCE_RATIO of the top score, is noise, not a citation.
+    lighthouse = _result("Built in 1887 by Edwin Ashcroft.", "lighthouse.md", 0, 0.83)
+    bridge_noise = _result(
+        "Constructed by Voss & Ardell in 1958.", "bridge.md", 0, 0.29
+    )
+    store = FakeVectorStore([lighthouse, bridge_noise])
+
+    result = answer_question(
+        "When was the lighthouse built, and who built it?", store
+    )
+
+    assert [c["source"] for c in result["citations"]] == ["lighthouse.md"]
+
+
+def test_cross_source_result_within_ratio_floor_is_kept():
+    # A genuinely relevant second document for a compound question — both
+    # sides score close to each other (measured ~0.96 for a real compound
+    # question spanning two documents) -> comfortably above the floor.
+    policy = _result("15 vacation days per year.", "policy.md", 0, 0.41)
+    benefits = _result("Health plan covers 90% after deductible.", "benefits.md", 0, 0.39)
+    store = FakeVectorStore([policy, benefits])
+
+    result = answer_question("What are my vacation and health benefits?", store)
+
+    assert {c["source"] for c in result["citations"]} == {"policy.md", "benefits.md"}
+
+
+def test_same_source_result_is_never_dropped_by_the_cross_source_ratio():
+    # The regression this whole mechanism must not cause: two genuinely
+    # relevant chunks from the SAME document (e.g. a bridge's two spans)
+    # can legitimately score as low as ~58% of each other — below
+    # MIN_CROSS_SOURCE_RATIO (0.6) — but must never be pruned, because
+    # they share a source with the top result.
+    span_1932 = _result("First span opened in 1932.", "bridge.md", 0, 0.60)
+    span_1961 = _result("Second span added in 1961.", "bridge.md", 1, 0.34)  # ratio 0.57
+    store = FakeVectorStore([span_1932, span_1961])
+
+    result = answer_question("Tell me about the bridge's spans.", store)
+
+    assert [c["chunk_index"] for c in result["citations"]] == [0, 1]
+
+
+def test_cross_source_ratio_can_be_overridden():
+    lighthouse = _result("Built in 1887.", "lighthouse.md", 0, 0.83)
+    bridge_noise = _result("Constructed in 1958.", "bridge.md", 0, 0.29)  # ratio 0.35
+    store = FakeVectorStore([lighthouse, bridge_noise])
+
+    result = answer_question(
+        "When was it built?", store, cross_source_ratio=0.2
+    )
+
+    assert {c["source"] for c in result["citations"]} == {
+        "lighthouse.md",
+        "bridge.md",
+    }
+
+
+def test_history_augmentation_does_not_inflate_the_cross_source_reference():
+    # /code-review regression: history-driven augmentation can boost a
+    # bare-relevant chunk's score (e.g. it also matches the prior turn's
+    # topic). That boosted score must not become the "top" that an
+    # unrelated-to-history but independently bare-relevant *other* source
+    # is measured against — that source got no augmentation boost of its
+    # own and would be unfairly penalized for it.
+    bridge = _result("Renovation replaced cables.", "bridge.md", 0, 0.50)
+    bridge_augmented = _result(
+        "Renovation replaced cables.", "bridge.md", 0, 0.75
+    )
+    policy = _result("15 vacation days per year.", "policy.md", 0, 0.38)
+    question = "what happened during the renovation, and what is the vacation policy?"
+    store = FakeVectorStore(
+        {
+            question: [bridge, policy],
+            f"How is the Meridian Bridge built?\n{question}": [bridge_augmented],
+            "How is the Meridian Bridge built?": [bridge_augmented],
+        }
+    )
+
+    result = answer_question(question, store, history=TWO_TURNS)
+
+    sources = {c["source"] for c in result["citations"]}
+    assert sources == {"bridge.md", "policy.md"}
+    # the bare-relevant chunk keeps its bare score, not the inflated one
+    bridge_citation = next(c for c in result["citations"] if c["source"] == "bridge.md")
+    assert bridge_citation["score"] == pytest.approx(0.50)
+
+
+def test_cross_source_filter_treats_two_none_sources_as_different():
+    # Defensive edge case: source is normally always a non-empty string
+    # (VectorStore.add_documents validates it), but if it were ever
+    # missing for two genuinely different chunks, `None == None` must not
+    # be read as "same document" and bypass the filter.
+    top = _result("Built in 1887.", "lighthouse.md", 0, 0.83)
+    top_no_source = dict(top, source=None)
+    noise_no_source = _result("Constructed in 1958.", "bridge.md", 0, 0.29)
+    noise_no_source = dict(noise_no_source, source=None)
+    store = FakeVectorStore([top_no_source, noise_no_source])
+
+    result = answer_question("When was it built?", store)
+
+    assert len(result["citations"]) == 1
+    assert result["citations"][0]["text"] == top["text"]
+
+
+def test_cross_source_filter_skipped_when_top_score_is_non_positive():
+    # min_score is a public parameter; a caller could set it low enough to
+    # admit non-positive scores. threshold = top_score * ratio would then
+    # invert (a negative top makes the threshold *higher* than top itself,
+    # rejecting everything) -- skip the filter rather than risk that.
+    a = _result("Chunk A.", "a.md", 0, -0.05)
+    b = _result("Chunk B.", "b.md", 0, -0.10)
+    store = FakeVectorStore([a, b])
+
+    result = answer_question("q", store, min_score=-1.0)
+
+    assert {c["source"] for c in result["citations"]} == {"a.md", "b.md"}
 
 
 def test_min_score_can_be_overridden():
@@ -403,6 +542,79 @@ def test_end_to_end_surface_similar_document_is_not_cited(tmp_path):
 
     sources = {c["source"] for c in result["citations"]}
     assert sources == {"recipe.md"}
+
+
+@pytest.mark.model
+def test_end_to_end_cross_source_surface_similar_sentence_is_not_cited(
+    tmp_path,
+):
+    """Regression test for the reported bug: with two documents in the
+    store, a question targeted at one still pulled in a chunk from the
+    other purely because of a similar sentence template ("constructed by
+    [name] in [year]"). Measured: lighthouse chunks at 0.83/0.67, the
+    unrelated bridge chunk at 0.29 (well above the 0.25 floor, well below
+    0.6 of the top score)."""
+    store = VectorStore(tmp_path)
+    store.add_documents(
+        [
+            "The Meridian Bridge is a suspension bridge spanning the "
+            "Halden River. It was constructed by the engineering firm "
+            "Voss & Ardell in 1958 and underwent a major renovation in "
+            "2003, during which the original cables were replaced."
+        ],
+        source="bridge.md",
+    )
+    store.add_documents(
+        chunk_text(
+            "The Willowbrook Lighthouse stands on a rocky point "
+            "overlooking Willowbrook Bay. Construction began in 1885 and "
+            "the light was first lit in 1887, marking the completion of "
+            "one of the region's tallest coastal towers at the time. "
+            "Ships traveling along the northern trade route had "
+            "previously relied on informal bonfires and lanterns kept by "
+            "local fishermen before the tower was built.\n\n"
+            "The lighthouse was constructed by the maritime architect "
+            "Edwin Ashcroft, who designed the tower's distinctive "
+            "octagonal shape to withstand the region's frequent storms. "
+            "Ashcroft had previously built two smaller lighthouses along "
+            "the coast before taking on this project, and Willowbrook is "
+            "considered his most ambitious work."
+        ),
+        source="lighthouse.md",
+    )
+
+    result = answer_question(
+        "When was the Willowbrook Lighthouse built, and who built it?",
+        store,
+    )
+
+    sources = {c["source"] for c in result["citations"]}
+    assert sources == {"lighthouse.md"}
+    assert len(result["citations"]) == 2  # both lighthouse chunks, no bridge
+
+
+@pytest.mark.model
+def test_end_to_end_broad_question_still_finds_all_chunks_of_one_document(
+    tmp_path,
+):
+    """The cross-source fix must not regress recall within a single
+    document: a broad question legitimately answered by several chunks of
+    the SAME source must keep all of them, even though one chunk scores
+    well under MIN_CROSS_SOURCE_RATIO of the other (measured ~0.58)."""
+    store = VectorStore(tmp_path)
+    store.add_documents(
+        [
+            "The Meridian Bridge's first span opened in 1932 carrying "
+            "rail traffic across the Halden River.",
+            "The second span was added in 1961 to carry automobile "
+            "traffic alongside the original rail span.",
+        ],
+        source="bridge.md",
+    )
+
+    result = answer_question("Tell me about the Meridian Bridge's spans.", store)
+
+    assert {c["chunk_index"] for c in result["citations"]} == {0, 1}
 
 
 def test_end_to_end_empty_real_store(tmp_path):
