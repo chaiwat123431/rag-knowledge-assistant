@@ -5,16 +5,19 @@ import { useEffect, useRef, useState } from "react";
 import { SquarePen } from "lucide-react";
 
 import { ChatComposer } from "@/components/ChatComposer";
+import { ConversationHistory } from "@/components/ConversationHistory";
 import { DocumentUpload } from "@/components/DocumentUpload";
 import { LanguageToggle } from "@/components/LanguageToggle";
 import { MessageBubble } from "@/components/MessageBubble";
 import { Button } from "@/components/ui/button";
 import { askQuestion, type HistoryMessage } from "@/lib/api";
 import { errorText, type Message } from "@/lib/chat";
+import { useConversations } from "@/lib/conversations-context";
 import { useLanguage } from "@/lib/language-context";
 
 export default function Home() {
   const { t } = useLanguage();
+  const { syncActive, startNew } = useConversations();
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
@@ -25,8 +28,22 @@ export default function Home() {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, loading]);
 
-  function newConversation() {
+  function clearActiveView() {
     setMessages([]);
+    setInput("");
+    setError(null);
+  }
+
+  function newConversation() {
+    // By the time this is clickable (disabled while messages is empty),
+    // syncActive has already persisted the current conversation on every
+    // message exchanged — nothing left to save, just detach from it.
+    clearActiveView();
+    startNew();
+  }
+
+  function handleLoadConversation(loaded: Message[]) {
+    setMessages(loaded);
     setInput("");
     setError(null);
   }
@@ -41,21 +58,29 @@ export default function Home() {
       content,
     }));
 
-    setMessages((prev) => [...prev, { role: "user", content: question }]);
+    const withQuestion: Message[] = [
+      ...messages,
+      { role: "user", content: question },
+    ];
+    setMessages(withQuestion);
+    syncActive(withQuestion);
     setInput("");
     setError(null);
     setLoading(true);
 
     try {
       const res = await askQuestion(question, history);
-      setMessages((prev) => [
-        ...prev,
+      const withAnswer: Message[] = [
+        ...withQuestion,
         { role: "assistant", content: res.answer, citations: res.citations },
-      ]);
+      ];
+      setMessages(withAnswer);
+      syncActive(withAnswer);
     } catch (err) {
       setError(errorText(err, t));
       // roll the optimistic question back so a retry starts clean
-      setMessages((prev) => prev.slice(0, -1));
+      setMessages(messages);
+      syncActive(messages);
       setInput(question);
     } finally {
       setLoading(false);
@@ -69,6 +94,17 @@ export default function Home() {
           <h1 className="text-sm font-semibold">{t.appTitle}</h1>
           <div className="flex items-center gap-1">
             <LanguageToggle />
+            <ConversationHistory
+              onLoad={handleLoadConversation}
+              onDeleteActive={clearActiveView}
+              // Switching or deleting a conversation while a request for
+              // the currently active one is in flight would let its
+              // response land on whatever conversation is active by the
+              // time it resolves, not the one that sent it — disable
+              // browsing history until the request settles, same as
+              // "New conversation" already does.
+              disabled={loading}
+            />
             <Button
               variant="ghost"
               size="sm"
