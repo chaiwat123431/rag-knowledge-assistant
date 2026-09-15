@@ -37,10 +37,10 @@ cosine ~0.52 for a totally unrelated question, versus ~0.0 for the bare
 question alone. So an augmented-only match is trusted only if adding the
 current question didn't erode its score against the prior-turn-alone
 query by more than `MAX_AUGMENTED_SCORE_DROP_RATIO`, a *fraction of the
-prior-turn score* — not a fixed absolute amount (see below for why) — a
+prior-turn score* — not a fixed absolute amount (see below for why). A
 large relative drop means the new question is pulling away from the old
-topic (measured: 20-37% relative drop for genuinely unrelated questions,
-versus at most ~10% for real context-dependent ones — a clean gap).
+topic — see "History-augmentation drop tolerance" below for the current
+measurements and why this is a mitigation, not a guarantee.
 Chunks that clear the floor via the bare query need no such check; the
 question itself justifies them. Assistant turns are never used for
 retrieval (long, carry the model's own phrasing). No LLM-based query
@@ -56,6 +56,41 @@ it started lower, even though *proportionally* it lost as much ground
 (26%) as the strongly-anchored chunk that was correctly rejected (20%).
 Measuring the drop as a fraction of the prior-turn score treats chunks
 with different baseline similarity consistently.
+
+History-augmentation drop tolerance (2026-09-15)
+-------------------------------------------------
+`MAX_AUGMENTED_SCORE_DROP_RATIO` has now been recalibrated three times
+(0.15 absolute -> 0.15 relative -> 0.10 relative) as larger samples kept
+revealing the real margin was narrower than the last measurement
+suggested. A third manual-testing recurrence (single document, chunked
+into 3 pieces, question "What is the capital of France?" after "and when
+was it decommissioned?") found a chunk passing at a 14% relative drop —
+under the 0.15 threshold the second recalibration set. Pooling every
+relative-drop measurement collected across all three rounds: genuinely
+unrelated questions never dropped by less than ~13%; real follow-ups
+never dropped by more than ~9% (often *improving* — a follow-up that
+reinforces the same topic can score higher than the prior turn alone).
+0.10 sits in that ~4-point gap.
+
+That gap has shrunk at every recalibration (roughly 10 points, then 5,
+now ~4), and one specific probe — a short, generic factual question like
+"What is the capital of France?" — has been the closest call each time,
+across different documents and different prior turns. This is treated as
+an **accepted structural limitation of the heuristic, not a fixed bug**:
+a single relative-score threshold on one embedding vector cannot
+perfectly separate "genuinely unrelated" from "topic-agnostic follow-up"
+in every case, and no further tightening of this same knob is planned —
+each recalibration buys a shrinking, diminishing margin at real
+implementation cost, and a structurally different mechanism (e.g. an
+LLM-based query rewrite, out of scope for this MVP heuristic) would be
+needed to close the gap for good.
+
+Concretely, and importantly: in every case measured across all three
+rounds, the LLM's *answer* stayed correct ("I don't know") — the prompt
+instructions ("cite every claim", "say you don't know" — see Prompt
+shape below) mean a stray chunk here is not reflected in the answer text.
+The residual risk is an occasional spurious *citation* next to a correct
+"I don't know" answer, not a wrong answer.
 
 Prompt shape
 ------------
@@ -148,8 +183,11 @@ MIN_RELEVANCE_SCORE = 0.25
 # (not a fixed absolute amount — see "Retrieval also uses history" above
 # for why that broke on a real multi-chunk document), before it's treated
 # as pure history carryover rather than a real match to the current
-# question. See that section for the measurements behind 0.15.
-MAX_AUGMENTED_SCORE_DROP_RATIO = 0.15
+# question. Lowered 0.15 -> 0.10 on 2026-09-15, the 3rd recalibration of
+# this same knob — see "History-augmentation drop tolerance" above for
+# the measurements behind 0.10 and why this is an accepted structural
+# limitation rather than a closed issue.
+MAX_AUGMENTED_SCORE_DROP_RATIO = 0.10
 
 # A relevant chunk from a DIFFERENT source than the top result must score
 # at least this fraction of the top result's score to survive; chunks
