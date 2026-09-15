@@ -67,15 +67,17 @@ FIVE_RESULTS = [
 def test_relevance_constants_match_the_documented_measurements():
     # Pins today's values so a future change is a deliberate diff, not a
     # silent drift. See the module docstring for the measurements behind
-    # both (2026-09-12: raised the floor after manual testing found 0.15
+    # each (2026-09-12: raised the floor after manual testing found 0.15
     # let surface-similarity noise through as citations. 2026-09-13: the
     # drop check became a ratio of the prior-turn score, not an absolute
     # amount, after a real multi-chunk-document recurrence of bug 1.
     # 2026-09-13: added a cross-source ratio floor after manual testing
     # found surface-similar sentences from an unrelated document could
-    # still clear the absolute floor).
+    # still clear the absolute floor. 2026-09-15: tightened the drop
+    # ratio 0.15 -> 0.10, a 2-turn-history recurrence of the same drop
+    # check, documented as an accepted structural limitation).
     assert MIN_RELEVANCE_SCORE == 0.25
-    assert MAX_AUGMENTED_SCORE_DROP_RATIO == 0.15
+    assert MAX_AUGMENTED_SCORE_DROP_RATIO == 0.10
     assert MIN_CROSS_SOURCE_RATIO == 0.6
 
 
@@ -486,6 +488,59 @@ def test_end_to_end_multi_chunk_document_unrelated_question_has_no_context(
 
 
 @pytest.mark.model
+def test_end_to_end_two_turn_history_unrelated_question_has_no_context(tmp_path):
+    """Regression test for the 2026-09-15 recurrence found via manual UI
+    testing: the two prior fixes were both verified with a single prior
+    turn in history. With TWO real, on-topic turns (a genuine follow-up
+    already answered correctly) an unrelated third question still leaked
+    a citation to a weakly-anchored chunk (the museum/visitors chunk,
+    prev_score ~0.44) at a ~14% relative drop — under the old 0.15 ratio.
+    """
+    store = VectorStore(tmp_path)
+    document = (
+        "The Willowbrook Lighthouse was built in 1887 by the architect "
+        "Edwin Ashcroft to guide ships along the rocky northern coast. "
+        "Its construction used locally quarried granite and took just "
+        "under two years to complete.\n\n"
+        "The lighthouse was decommissioned in 1962 after automated "
+        "navigation buoys made its beacon unnecessary for passing "
+        "ships. The light itself was removed and donated to a maritime "
+        "museum in the neighboring county.\n\n"
+        "Today the site operates as a small museum welcoming visitors "
+        "year-round, with exhibits on the lighthouse's construction and "
+        "its decades of service guiding ships safely along the coast."
+    )
+    chunks = chunk_text(document)
+    assert len(chunks) > 1  # exercising the real chunker
+    store.add_documents(chunks, source="willowbrook-lighthouse.txt")
+
+    history = [
+        {
+            "role": "user",
+            "content": "When was the Willowbrook Lighthouse built?",
+        },
+        {
+            "role": "assistant",
+            "content": "The Willowbrook Lighthouse was built in 1887 "
+            "by the architect Edwin Ashcroft [1].",
+        },
+        {"role": "user", "content": "and when was it decommissioned?"},
+        {
+            "role": "assistant",
+            "content": "It was decommissioned in 1962 after automated "
+            "navigation buoys made its beacon unnecessary [1].",
+        },
+    ]
+
+    result = answer_question(
+        "What is the capital of France?", store, history=history
+    )
+
+    assert result["has_context"] is False
+    assert result["citations"] == []
+
+
+@pytest.mark.model
 def test_end_to_end_genuine_followup_still_finds_the_history_topic(tmp_path):
     """The fix for the bug above must not regress the feature it's a part
     of: a content-free follow-up should still retrieve the prior topic."""
@@ -753,7 +808,8 @@ def test_augmented_only_chunk_kept_when_score_barely_drops_from_prev_turn():
     # A real complement: the augmented query surfaces a chunk the bare
     # query missed, and its score is close to what the prior turn alone
     # gets for that same chunk (small drop) -> genuine relevance, kept.
-    bridge = _result("The Meridian Bridge has two spans.", "bridge.md", 1, 0.60)
+    # Drop is (0.68-0.62)/0.68 ~= 8.8%, under the 0.10 threshold.
+    bridge = _result("The Meridian Bridge has two spans.", "bridge.md", 1, 0.62)
     bridge_prev_alone = _result(bridge["text"], "bridge.md", 1, 0.68)
     store = FakeVectorStore(
         {
@@ -843,6 +899,44 @@ def test_relative_drop_rejects_a_weakly_anchored_chunk_absolute_drop_would_keep(
 
     result = answer_question(
         "What is the capital of France?", store, top_k=5, history=TWO_TURNS
+    )
+
+    assert result["citations"] == []
+    assert result["has_context"] is False
+
+
+def test_narrow_margin_drop_rejected_by_010_but_would_have_passed_015():
+    # Regression test for the 2026-09-15 recurrence: a 2-turn-history
+    # question ("and when was it decommissioned?" then "What is the
+    # capital of France?") leaked a citation with a ~14% relative drop —
+    # under the old 0.15 ratio (kept) but over the new 0.10 one (dropped).
+    lighthouse = _result(
+        "The lighthouse museum welcomes visitors year-round.",
+        "lighthouse.md",
+        2,
+        0.38,
+    )
+    lighthouse_prev_alone = _result(lighthouse["text"], "lighthouse.md", 2, 0.44)
+    store = FakeVectorStore(
+        {
+            "What is the capital of France?": [],
+            "and when was it decommissioned?\nWhat is the capital of France?": [
+                lighthouse
+            ],
+            "and when was it decommissioned?": [lighthouse_prev_alone],
+        }
+    )
+
+    result = answer_question(
+        "What is the capital of France?",
+        store,
+        top_k=5,
+        history=[
+            {"role": "user", "content": "When was the Willowbrook Lighthouse built?"},
+            {"role": "assistant", "content": "It was built in 1887."},
+            {"role": "user", "content": "and when was it decommissioned?"},
+            {"role": "assistant", "content": "It was decommissioned in 1962."},
+        ],
     )
 
     assert result["citations"] == []
