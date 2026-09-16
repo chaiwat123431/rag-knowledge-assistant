@@ -36,6 +36,17 @@ class OllamaModelNotFoundError(LLMError):
     """The requested model isn't pulled on the Ollama server."""
 
 
+def _require_nonempty_prompt(prompt) -> None:
+    """Raise ValueError unless `prompt` is a non-empty string.
+
+    Shared with `gemini.py` (imported from here, not copy-pasted) so both
+    backends of the same `generate_answer(prompt, model=...) -> str`
+    contract validate their input identically.
+    """
+    if not isinstance(prompt, str) or not prompt.strip():
+        raise ValueError("prompt must be a non-empty string")
+
+
 def generate_answer(
     prompt: str,
     model: str = DEFAULT_MODEL,
@@ -63,8 +74,7 @@ def generate_answer(
         OllamaModelNotFoundError: `model` isn't available on the server.
         LLMError: any other non-success response.
     """
-    if not isinstance(prompt, str) or not prompt.strip():
-        raise ValueError("prompt must be a non-empty string")
+    _require_nonempty_prompt(prompt)
 
     url = f"{base_url.rstrip('/')}/api/generate"
     payload = {"model": model, "prompt": prompt, "stream": False}

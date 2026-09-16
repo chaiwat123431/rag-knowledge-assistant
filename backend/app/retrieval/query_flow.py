@@ -570,8 +570,17 @@ def answer_with_llm(
             for a non-default Ollama host/timeout, pass
             ``functools.partial(generate_answer, base_url=..., timeout=...)``;
             for a different backend (e.g. Gemini in production) or in tests,
-            pass any callable with the same shape.
-        model: model name forwarded to `generate`.
+            pass any callable with the same shape. IMPORTANT: `model` below
+            is a separate parameter, not derived from `generate` — swapping
+            `generate` alone (e.g. to `gemini.generate_answer`) without also
+            passing a matching `model` (e.g. `model=gemini.DEFAULT_MODEL`)
+            silently sends the wrong backend's model name to the new
+            backend. There is no runtime dev/prod backend-selection wiring
+            yet (see PLANNING.md); until there is, always pass `generate`
+            and `model` together.
+        model: model name forwarded to `generate`. Defaults to Ollama's
+            model name — see the `generate` note above before overriding
+            only one of the pair.
 
     Returns:
         A dict:

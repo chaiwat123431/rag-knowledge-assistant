@@ -28,7 +28,7 @@ files.
 | Embeddings | `sentence-transformers` (local, e.g. `all-MiniLM-L6-v2`) | Runs locally, no API cost or key, good baseline quality for a single-user portfolio project. Was OpenAI `text-embedding-3-small`; switched to avoid paid API dependency. |
 | LLM (dev) | Ollama (local) | Free local inference during development; no rate limits or keys while iterating |
 | LLM (prod) | Google Gemini API — Flash model (free tier) | Free tier covers portfolio-scale usage; no local GPU needed on the deployment host. Replaces the earlier implicit OpenAI assumption. |
-| LLM call — direct HTTP, not LangChain | `llm.generate_answer()` calls Ollama's `/api/generate` with `httpx` directly | One narrow function is easier to reason about and test than a LangChain LLM wrapper for a single call; `answer_with_llm` takes an injectable `generate` callable so the Gemini prod backend is a drop-in. `httpx` over `requests`: FastAPI-native, async-ready, constructible `Response` for deterministic test mocking. |
+| LLM call — direct HTTP, not LangChain | `llm.generate_answer()` calls Ollama's `/api/generate` with `httpx` directly; `gemini.generate_answer()` (same contract) calls Gemini's `generateContent` the same way | One narrow function is easier to reason about and test than a LangChain LLM wrapper for a single call; `answer_with_llm` takes an injectable `generate` callable, and `gemini.py` is now the implemented Gemini prod drop-in, not just a planned one. `httpx` over `requests`: FastAPI-native, async-ready, constructible `Response` for deterministic test mocking. |
 | Chunking | Recursive character splitter, ~500 tokens, 50 token overlap | Balances context completeness vs. retrieval precision. **Implemented as a custom word-boundary splitter instead** (character-based, no token count), not LangChain's `RecursiveCharacterTextSplitter` — revisit if paragraph/sentence-aware splitting turns out to matter once retrieval quality is measured. |
 | Frontend | Next.js 16 (App Router) + TypeScript + Tailwind v4 + shadcn/ui | Phase 3. `create-next-app@latest` installed 16 (not the planned "14+"): Turbopack by default, Tailwind v4, React 19. shadcn/ui `radix-nova` style; native `fetch` + `useState` (no TanStack Query yet). Dark mode via `prefers-color-scheme`, no toggle. |
 
@@ -56,7 +56,8 @@ rag-assistant/
 │   │   │   ├── embeddings.py    # embedding generation [done]
 │   │   │   ├── vector_store.py  # Chroma interface [done]
 │   │   │   ├── query_flow.py    # retrieve -> prompt -> answer + citations [done]
-│   │   │   └── llm.py           # Ollama HTTP client [done]
+│   │   │   ├── llm.py           # Ollama HTTP client (dev) [done]
+│   │   │   └── gemini.py        # Gemini HTTP client (prod) [done]
 │   │   └── api/
 │   │       └── routes.py        # HTTP endpoints (/query, /documents)
 │   ├── tests/
@@ -134,6 +135,15 @@ rag-assistant/
     - `/code-review` fix: switching/deleting conversations while a request for the active one was in flight could write a stale response into the wrong conversation — fixed by disabling history browsing while `loading` (same guard "New conversation" already had) rather than resolving the race after the fact; deleting the on-screen conversation now clears the view via an `onDeleteActive` callback
   - [ ] Polish (later): streaming answers, mobile layout, per-message retry
   - **Note on stack:** planned as "Next.js 14+"; `create-next-app@latest` installed 16.3 (Turbopack default, Tailwind v4, React 19).
+- [x] Gemini production LLM client (`gemini.py` + tests) — `feature/gemini-integration`, PR #15
+  - `gemini.generate_answer(prompt, model=..., *, api_key=None, timeout=...) -> str` — exact same call contract as `llm.generate_answer` (Ollama), so it's a drop-in for `answer_with_llm(..., generate=...)` (see Architecture Decisions)
+  - Direct HTTP via `httpx`, not the official `google-generativeai` SDK — same reasoning as the Ollama client: one narrow function over a stable REST endpoint is easier to mock deterministically (a constructed `httpx.Response`) than an SDK client object, and avoids the SDK's grpc/protobuf/google-auth dependency chain
+  - `GEMINI_API_KEY` (python-dotenv, already documented in `backend/.env.example`) sent via the `x-goog-api-key` header, never the URL. `GeminiError` subclasses `llm.LLMError` rather than starting a separate hierarchy, so `answer_with_llm`'s documented "Raises: LLMError (and subclasses)" stays true regardless of which backend `generate` is bound to
+  - Error taxonomy: `GeminiAuthError` (missing/invalid key — a missing key is caught locally before any network call), `GeminiTimeoutError`, and a generic `GeminiError` for everything else (network errors, non-2xx responses, and a candidate blocked by Gemini's safety filters — a failure mode with no Ollama equivalent). No separate "unavailable" class unlike Ollama: a cloud API has no "start the local server" remediation, so connection-level failures fold into the generic error
+  - New `@pytest.mark.gemini` marker (mirrors `@pytest.mark.ollama`): real-API tests skip cleanly without `GEMINI_API_KEY`. A `model` + `gemini` end-to-end test drives `answer_with_llm(..., generate=gemini.generate_answer)` against a real `VectorStore` to prove genuine interchangeability, not just a matching signature
+  - Found via the real API, not assumed: `gemini-2.0-flash` (the originally intended default) is no longer served (HTTP 404, "use models/gemini-3.6-flash") — `DEFAULT_MODEL` set to what the live API itself recommends
+  - `/code-review` fixes: `_is_auth_error`/`_error_detail` guarded against explicit-`null` JSON shapes (a safety-blocked candidate's `content`, a part's `text`, an `"error"` field as a plain string e.g. from a proxy) that previously raised an uncaught `AttributeError` instead of the documented `GeminiError`; the two helpers now share a single parsed response body instead of each re-parsing it; prompt-emptiness validation deduplicated into a shared `_require_nonempty_prompt` used by both backends
+  - **Not yet wired in**: no dev/prod backend-selection logic in `routes.py` — `answer_with_llm`'s `generate` and `model` parameters still both default to Ollama's. Deliberately deferred to a separate task; its docstring now warns that swapping only `generate` without also passing a matching `model` would silently send Ollama's model name to Gemini
 
 ## Phase 1 MVP: complete
 All backend slices done. `POST /documents` to ingest, `POST /query` (with optional
