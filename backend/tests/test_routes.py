@@ -3,6 +3,8 @@ from fastapi.testclient import TestClient
 
 from app.api.routes import get_llm, get_vector_store
 from app.main import app
+from app.retrieval import gemini
+from app.retrieval import llm as ollama_llm
 from app.retrieval.llm import (
     OllamaModelNotFoundError,
     OllamaTimeoutError,
@@ -47,20 +49,117 @@ def _stub_llm(answer="A stubbed answer [1]."):
     return generate
 
 
+def _capturing_llm(answer="A stubbed answer [1]."):
+    """Like `_stub_llm`, but records each call's (prompt, model) on
+    `.calls` — for tests asserting on what `query()` actually passed
+    through, e.g. the model half of `get_llm`'s (generate, model) pair."""
+    calls = []
+
+    def generate(prompt, model="stub"):
+        calls.append({"prompt": prompt, "model": model})
+        return answer
+
+    generate.calls = calls
+    return generate
+
+
 @pytest.fixture
 def client():
-    """Yields a factory: configure(store=..., generate=...) -> TestClient."""
+    """Yields a factory: configure(store=..., generate=..., model=...) ->
+    TestClient. `model` only matters to tests that inspect what was
+    actually passed to `generate` (see `_capturing_llm`) — every other
+    test's stub ignores it."""
 
-    def configure(store, generate=None, use_real_llm=False):
+    def configure(store, generate=None, model="stub-model", use_real_llm=False):
         app.dependency_overrides[get_vector_store] = lambda: store
         if not use_real_llm:
-            app.dependency_overrides[get_llm] = lambda: generate or _stub_llm()
+            app.dependency_overrides[get_llm] = lambda: (
+                generate or _stub_llm(),
+                model,
+            )
         return TestClient(app)
 
     yield configure
 
     app.dependency_overrides.clear()
     get_vector_store.cache_clear()
+
+
+# --- get_llm: LLM_PROVIDER selection --------------------------------------
+
+
+def test_get_llm_defaults_to_ollama_when_unset(monkeypatch):
+    monkeypatch.delenv("LLM_PROVIDER", raising=False)
+
+    generate, model = get_llm()
+
+    assert generate is ollama_llm.generate_answer
+    assert model == ollama_llm.DEFAULT_MODEL
+
+
+def test_get_llm_selects_ollama_explicitly(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+
+    generate, model = get_llm()
+
+    assert generate is ollama_llm.generate_answer
+    assert model == ollama_llm.DEFAULT_MODEL
+
+
+def test_get_llm_selects_gemini(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
+
+    generate, model = get_llm()
+
+    assert generate is gemini.generate_answer
+    assert model == gemini.DEFAULT_MODEL
+
+
+@pytest.mark.parametrize("raw", ["Gemini", " GEMINI ", "gemini\n", "  gemini"])
+def test_get_llm_provider_is_case_insensitive_and_trimmed(monkeypatch, raw):
+    monkeypatch.setenv("LLM_PROVIDER", raw)
+
+    generate, _ = get_llm()
+
+    assert generate is gemini.generate_answer
+
+
+def test_get_llm_rejects_unknown_provider(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "openai")
+
+    with pytest.raises(RuntimeError) as excinfo:
+        get_llm()
+
+    message = str(excinfo.value)
+    assert "openai" in message
+    assert "ollama" in message
+    assert "gemini" in message
+
+
+def test_get_llm_empty_string_falls_back_to_ollama(monkeypatch):
+    # An env var explicitly set to "" (e.g. an unset deploy-config
+    # placeholder) should behave like unset, not like an unknown provider.
+    monkeypatch.setenv("LLM_PROVIDER", "")
+
+    generate, model = get_llm()
+
+    assert generate is ollama_llm.generate_answer
+    assert model == ollama_llm.DEFAULT_MODEL
+
+
+# --- /query: get_llm's (generate, model) pair reaches answer_with_llm ----
+
+
+def test_query_passes_the_paired_model_to_answer_with_llm(client):
+    store = FakeStore([_result("A relevant fact.", "src.md", 0, 0.9)])
+    stub = _capturing_llm()
+    c = client(store, generate=stub, model="custom-model-x")
+
+    response = c.post("/query", json={"question": "What is it?"})
+
+    assert response.status_code == 200
+    assert stub.calls
+    assert stub.calls[-1]["model"] == "custom-model-x"
 
 
 # --- /query --------------------------------------------------------------
