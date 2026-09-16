@@ -1,7 +1,12 @@
 import pytest
 from fastapi.testclient import TestClient
 
-from app.api.routes import get_llm, get_vector_store
+from app.api.routes import (
+    _LLM_PROVIDERS,
+    LLMProviderConfigError,
+    get_llm,
+    get_vector_store,
+)
 from app.main import app
 from app.retrieval import gemini
 from app.retrieval import llm as ollama_llm
@@ -44,16 +49,10 @@ def _result(text, source, chunk_index, score):
 
 
 def _stub_llm(answer="A stubbed answer [1]."):
-    def generate(prompt, model="stub"):
-        return answer
-
-    return generate
-
-
-def _capturing_llm(answer="A stubbed answer [1]."):
-    """Like `_stub_llm`, but records each call's (prompt, model) on
-    `.calls` — for tests asserting on what `query()` actually passed
-    through, e.g. the model half of `get_llm`'s (generate, model) pair."""
+    """Records each call's (prompt, model) on the returned callable's
+    `.calls` — most tests ignore it, but it's there for the ones
+    asserting on what `query()` actually passed through, e.g. the model
+    half of `get_llm`'s (generate, model) pair."""
     calls = []
 
     def generate(prompt, model="stub"):
@@ -68,8 +67,8 @@ def _capturing_llm(answer="A stubbed answer [1]."):
 def client():
     """Yields a factory: configure(store=..., generate=..., model=...) ->
     TestClient. `model` only matters to tests that inspect what was
-    actually passed to `generate` (see `_capturing_llm`) — every other
-    test's stub ignores it."""
+    actually passed to `generate` (via its `.calls`, see `_stub_llm`) —
+    every other test's stub ignores it."""
 
     def configure(store, generate=None, model="stub-model", use_real_llm=False):
         app.dependency_overrides[get_vector_store] = lambda: store
@@ -80,10 +79,7 @@ def client():
             # meant "real Ollama" for this flag, and get_llm() is now
             # env-driven, so leaving it un-overridden would silently call
             # Gemini instead if LLM_PROVIDER=gemini is set.
-            app.dependency_overrides[get_llm] = lambda: (
-                ollama_llm.generate_answer,
-                ollama_llm.DEFAULT_MODEL,
-            )
+            app.dependency_overrides[get_llm] = lambda: _LLM_PROVIDERS["ollama"]
         else:
             app.dependency_overrides[get_llm] = lambda: (
                 generate or _stub_llm(),
@@ -139,7 +135,7 @@ def test_get_llm_provider_is_case_insensitive_and_trimmed(monkeypatch, raw):
 def test_get_llm_rejects_unknown_provider(monkeypatch):
     monkeypatch.setenv("LLM_PROVIDER", "openai")
 
-    with pytest.raises(RuntimeError) as excinfo:
+    with pytest.raises(LLMProviderConfigError) as excinfo:
         get_llm()
 
     message = str(excinfo.value)
@@ -172,12 +168,35 @@ def test_get_llm_whitespace_only_falls_back_to_ollama(monkeypatch, raw):
     assert model == ollama_llm.DEFAULT_MODEL
 
 
+def test_query_unknown_llm_provider_returns_500_with_detail(monkeypatch):
+    # Regression test: LLMProviderConfigError is raised during get_llm's
+    # dependency resolution, before query()'s own try/except runs — this
+    # proves main.py's exception_handler actually surfaces the message
+    # (via LLMProviderConfigError, not just as a bare "Internal Server
+    # Error" that would discard it).
+    monkeypatch.setenv("LLM_PROVIDER", "bogus")
+    store = FakeStore([_result("x", "d.md", 0, 0.9)])
+    app.dependency_overrides[get_vector_store] = lambda: store
+    # Deliberately not overriding get_llm — exercise the real dependency.
+    try:
+        response = TestClient(app).post("/query", json={"question": "hello"})
+    finally:
+        app.dependency_overrides.clear()
+        get_vector_store.cache_clear()
+
+    assert response.status_code == 500
+    detail = response.json()["detail"]
+    assert "bogus" in detail
+    assert "ollama" in detail
+    assert "gemini" in detail
+
+
 # --- /query: get_llm's (generate, model) pair reaches answer_with_llm ----
 
 
 def test_query_passes_the_paired_model_to_answer_with_llm(client):
     store = FakeStore([_result("A relevant fact.", "src.md", 0, 0.9)])
-    stub = _capturing_llm()
+    stub = _stub_llm()
     c = client(store, generate=stub, model="custom-model-x")
 
     response = c.post("/query", json={"question": "What is it?"})

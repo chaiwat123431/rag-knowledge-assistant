@@ -82,6 +82,22 @@ _LLM_PROVIDERS: dict[str, tuple[Callable[..., str], str]] = {
 }
 
 
+class LLMProviderConfigError(RuntimeError):
+    """`LLM_PROVIDER` is set to something other than a known provider.
+
+    Raised by `get_llm()`, a FastAPI dependency — which means it's raised
+    during dependency *resolution*, before any handler body (and its own
+    try/except) runs. A plain exception raised there would still surface
+    as a 500 (FastAPI's default for an unhandled error), but as a bare
+    "Internal Server Error" with the carefully-built message below
+    discarded. This dedicated type exists so `main.py` can register an
+    `app.exception_handler` for it specifically and return that message
+    as the response's `detail`, matching every other error in this
+    module. A subclass of RuntimeError so `except RuntimeError` still
+    catches it too.
+    """
+
+
 def get_llm() -> tuple[Callable[..., str], str]:
     """The `(generate, model)` pair to use, selected by `LLM_PROVIDER`
     ("ollama", the default, or "gemini"; matched case-insensitively,
@@ -92,11 +108,11 @@ def get_llm() -> tuple[Callable[..., str], str]:
     (`monkeypatch.setenv`) without a cache to clear between cases.
 
     Raises:
-        RuntimeError: `LLM_PROVIDER` is set to something other than a
-            known provider name. A misconfiguration, not a transient
-            failure — deliberately left uncaught here (surfaces as a
-            plain 500) rather than mapped like the LLMError family below,
-            which are runtime failures of an already-selected backend.
+        LLMProviderConfigError: `LLM_PROVIDER` is set to something other
+            than a known provider name. A misconfiguration, not a
+            transient failure — see that class's docstring for how its
+            detail message reaches the client despite being raised
+            outside `query()`'s own try/except.
     """
     # Strip *before* falling back to "ollama": a whitespace-only value
     # (e.g. "   ") is truthy and would otherwise skip the fallback, then
@@ -107,7 +123,7 @@ def get_llm() -> tuple[Callable[..., str], str]:
     try:
         return _LLM_PROVIDERS[provider]
     except KeyError:
-        raise RuntimeError(
+        raise LLMProviderConfigError(
             f"Unknown LLM_PROVIDER {provider!r}. Must be one of "
             f"{sorted(_LLM_PROVIDERS)}."
         ) from None

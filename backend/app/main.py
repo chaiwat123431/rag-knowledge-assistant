@@ -3,10 +3,11 @@
 import os
 
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
-from app.api.routes import router
+from app.api.routes import LLMProviderConfigError, router
 
 # Load backend/.env if present (uvicorn doesn't do this itself), so the
 # vars documented in .env.example actually take effect.
@@ -33,6 +34,20 @@ app.add_middleware(
 )
 
 app.include_router(router)
+
+
+# get_llm() (a FastAPI dependency, resolved before any handler's own
+# try/except runs) raises this for an unrecognized LLM_PROVIDER. Without
+# this handler, FastAPI's default unhandled-exception path would still
+# return a 500 but discard the message, as a bare "Internal Server
+# Error" — this keeps that detail and matches the {"detail": ...} shape
+# every other error in the API already returns (see LLMProviderConfigError's
+# docstring).
+@app.exception_handler(LLMProviderConfigError)
+async def llm_provider_config_error_handler(
+    request: Request, exc: LLMProviderConfigError
+) -> JSONResponse:
+    return JSONResponse(status_code=500, content={"detail": str(exc)})
 
 
 @app.get("/health")
