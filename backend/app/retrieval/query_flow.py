@@ -575,9 +575,10 @@ def answer_with_llm(
             `generate` alone (e.g. to `gemini.generate_answer`) without also
             passing a matching `model` (e.g. `model=gemini.DEFAULT_MODEL`)
             silently sends the wrong backend's model name to the new
-            backend. There is no runtime dev/prod backend-selection wiring
-            yet (see PLANNING.md); until there is, always pass `generate`
-            and `model` together.
+            backend. `app.api.routes.get_llm()` is the runtime dev/prod
+            selection wiring (`LLM_PROVIDER` env var) and always passes
+            `generate` and `model` together as one bundled pair for
+            exactly this reason — do the same in any other caller.
         model: model name forwarded to `generate`. Defaults to Ollama's
             model name — see the `generate` note above before overriding
             only one of the pair.

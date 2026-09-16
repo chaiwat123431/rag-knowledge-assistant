@@ -7,10 +7,13 @@ domain errors into deliberate status codes:
 
 - 400 for bad input (empty question, unreadable/unsupported/empty file)
 - 503 when a backend is *transiently* unavailable — Ollama not running or
-  timing out, or the embedding model can't be fetched on first ingest;
-  retrying later may succeed
+  timing out, Gemini unreachable or erroring server-side, or the
+  embedding model can't be fetched on first ingest; retrying later may
+  succeed
 - 500 for a non-retryable backend misconfiguration — Ollama is up but the
-  requested model was never pulled; a human has to run `ollama pull`
+  requested model was never pulled (`OllamaModelNotFoundError`), or
+  Gemini rejected a missing/invalid API key (`GeminiAuthError`); a human
+  has to fix the underlying config (`ollama pull ...` / `GEMINI_API_KEY`)
 
 Genuinely unexpected failures still surface as 500 — that's correct.
 
@@ -53,6 +56,7 @@ from app.ingestion.parser import (
 )
 from app.retrieval import gemini
 from app.retrieval import llm as ollama_llm
+from app.retrieval.gemini import GeminiAuthError
 from app.retrieval.llm import LLMError, OllamaModelNotFoundError
 from app.retrieval.query_flow import InvalidHistoryError, answer_with_llm
 from app.retrieval.vector_store import VectorStore
@@ -94,7 +98,12 @@ def get_llm() -> tuple[Callable[..., str], str]:
             plain 500) rather than mapped like the LLMError family below,
             which are runtime failures of an already-selected backend.
     """
-    provider = (os.environ.get("LLM_PROVIDER") or "ollama").strip().lower()
+    # Strip *before* falling back to "ollama": a whitespace-only value
+    # (e.g. "   ") is truthy and would otherwise skip the fallback, then
+    # get stripped down to "" and rejected as an unknown provider —
+    # inconsistent with the plain-empty-string case, which is meant to
+    # behave like unset.
+    provider = (os.environ.get("LLM_PROVIDER") or "").strip().lower() or "ollama"
     try:
         return _LLM_PROVIDERS[provider]
     except KeyError:
@@ -150,7 +159,12 @@ class IngestResponse(BaseModel):
     response_model=QueryResponse,
     responses={
         400: {"description": "Empty question or malformed history"},
-        500: {"description": "LLM misconfigured (model not pulled)"},
+        500: {
+            "description": (
+                "LLM misconfigured (Ollama model not pulled, or invalid/"
+                "missing Gemini API key)"
+            )
+        },
         503: {"description": "LLM backend unavailable / timed out"},
     },
 )
@@ -185,9 +199,15 @@ def query(
         # Ollama is up but the model was never pulled — not transient,
         # retrying won't help; an operator must fix it.
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except GeminiAuthError as exc:
+        # Missing or invalid GEMINI_API_KEY — same "non-retryable
+        # misconfiguration" bucket as OllamaModelNotFoundError above, not
+        # the generic (transient) LLMError case below. Must be caught
+        # before it since GeminiAuthError is itself an LLMError subclass.
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
     except LLMError as exc:
-        # Ollama unreachable or timed out — a transient backend problem,
-        # not a client error; retrying later may work.
+        # Backend unreachable, timed out, or erroring server-side — a
+        # transient problem, not a client error; retrying later may work.
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     return QueryResponse(

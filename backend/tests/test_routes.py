@@ -5,6 +5,7 @@ from app.api.routes import get_llm, get_vector_store
 from app.main import app
 from app.retrieval import gemini
 from app.retrieval import llm as ollama_llm
+from app.retrieval.gemini import GeminiAuthError
 from app.retrieval.llm import (
     OllamaModelNotFoundError,
     OllamaTimeoutError,
@@ -72,7 +73,18 @@ def client():
 
     def configure(store, generate=None, model="stub-model", use_real_llm=False):
         app.dependency_overrides[get_vector_store] = lambda: store
-        if not use_real_llm:
+        if use_real_llm:
+            # Pin to the real Ollama backend explicitly, regardless of
+            # whatever LLM_PROVIDER happens to be set to in the ambient
+            # environment this test suite runs in — "real LLM" has always
+            # meant "real Ollama" for this flag, and get_llm() is now
+            # env-driven, so leaving it un-overridden would silently call
+            # Gemini instead if LLM_PROVIDER=gemini is set.
+            app.dependency_overrides[get_llm] = lambda: (
+                ollama_llm.generate_answer,
+                ollama_llm.DEFAULT_MODEL,
+            )
+        else:
             app.dependency_overrides[get_llm] = lambda: (
                 generate or _stub_llm(),
                 model,
@@ -140,6 +152,19 @@ def test_get_llm_empty_string_falls_back_to_ollama(monkeypatch):
     # An env var explicitly set to "" (e.g. an unset deploy-config
     # placeholder) should behave like unset, not like an unknown provider.
     monkeypatch.setenv("LLM_PROVIDER", "")
+
+    generate, model = get_llm()
+
+    assert generate is ollama_llm.generate_answer
+    assert model == ollama_llm.DEFAULT_MODEL
+
+
+@pytest.mark.parametrize("raw", ["   ", "\n", "\t "])
+def test_get_llm_whitespace_only_falls_back_to_ollama(monkeypatch, raw):
+    # Regression test: "   " is truthy, so it used to skip the "unset"
+    # fallback, then get stripped down to "" and rejected as an unknown
+    # provider — inconsistent with the plain-empty-string case above.
+    monkeypatch.setenv("LLM_PROVIDER", raw)
 
     generate, model = get_llm()
 
@@ -294,6 +319,23 @@ def test_query_llm_model_not_found_returns_500(client):
 
     assert response.status_code == 500
     assert "ollama pull" in response.json()["detail"].lower()
+
+
+def test_query_gemini_auth_error_returns_500_not_503(client):
+    # Same "non-retryable misconfiguration" bucket as the Ollama
+    # model-not-found case above — a bad/missing GEMINI_API_KEY will never
+    # resolve itself by retrying, unlike a generic (transient) LLMError.
+    store = FakeStore([_result("relevant text", "d.md", 0, 0.9)])
+
+    def bad_key(prompt, model="stub"):
+        raise GeminiAuthError("Gemini rejected the API key (...).")
+
+    c = client(store, generate=bad_key)
+
+    response = c.post("/query", json={"question": "a real question"})
+
+    assert response.status_code == 500
+    assert "api key" in response.json()["detail"].lower()
 
 
 # --- /query conversation history --------------------------------------------
