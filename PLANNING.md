@@ -1,4 +1,4 @@
-# Personal AI Knowledge Assistant — Planning
+# RAG Knowledge Assistant — Planning
 
 ## Problem Statement
 Ingest personal documents (PDFs, notes, text files) and answer natural-language
