@@ -237,24 +237,39 @@ def test_bad_request_not_about_api_key_raises_generic_error(monkeypatch):
     assert not isinstance(excinfo.value, GeminiAuthError)
 
 
-def test_read_timeout_raises_gemini_timeout(monkeypatch):
+def test_error_field_as_a_string_does_not_crash_error_handling(monkeypatch):
+    # A gateway/proxy in front of the real endpoint could plausibly return
+    # {"error": "some string"} rather than Gemini's own {"error": {...}}
+    # shape — must still raise GeminiError cleanly, not AttributeError.
+    def handler(url, json, headers, timeout):
+        return httpx.Response(400, json={"error": "Bad Gateway"})
+
+    _patch_post(monkeypatch, handler)
+
+    with pytest.raises(GeminiError) as excinfo:
+        generate_answer("hi", api_key="test-key")
+
+    assert not isinstance(excinfo.value, GeminiAuthError)
+    assert "Bad Gateway" in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        httpx.ReadTimeout("timed out"),
+        httpx.ConnectTimeout("connect timed out"),
+        httpx.PoolTimeout("pool timed out"),
+    ],
+    ids=["read", "connect", "pool"],
+)
+def test_any_timeout_exception_raises_gemini_timeout(exc, monkeypatch):
     def handler(*a, **k):
-        raise httpx.ReadTimeout("timed out")
+        raise exc
 
     _patch_post(monkeypatch, handler)
 
     with pytest.raises(GeminiTimeoutError):
         generate_answer("hi", api_key="test-key", timeout=1.0)
-
-
-def test_connect_timeout_raises_gemini_timeout(monkeypatch):
-    def handler(*a, **k):
-        raise httpx.ConnectTimeout("connect timed out")
-
-    _patch_post(monkeypatch, handler)
-
-    with pytest.raises(GeminiTimeoutError):
-        generate_answer("hi", api_key="test-key")
 
 
 def test_connection_error_raises_generic_gemini_error(monkeypatch):
@@ -314,6 +329,34 @@ def test_candidate_with_no_text_raises_gemini_error(monkeypatch):
     def handler(url, json, headers, timeout):
         return httpx.Response(
             200, json={"candidates": [{"content": {"parts": []}}]}
+        )
+
+    _patch_post(monkeypatch, handler)
+
+    with pytest.raises(GeminiError):
+        generate_answer("hi", api_key="test-key")
+
+
+def test_candidate_with_explicit_null_content_raises_gemini_error(monkeypatch):
+    # A realistic shape for a blocked/truncated candidate: "content" is
+    # present but explicitly null, not merely absent.
+    def handler(url, json, headers, timeout):
+        return httpx.Response(
+            200,
+            json={"candidates": [{"finishReason": "SAFETY", "content": None}]},
+        )
+
+    _patch_post(monkeypatch, handler)
+
+    with pytest.raises(GeminiError):
+        generate_answer("hi", api_key="test-key")
+
+
+def test_candidate_with_explicit_null_part_text_raises_gemini_error(monkeypatch):
+    def handler(url, json, headers, timeout):
+        return httpx.Response(
+            200,
+            json={"candidates": [{"content": {"parts": [{"text": None}]}}]},
         )
 
     _patch_post(monkeypatch, handler)

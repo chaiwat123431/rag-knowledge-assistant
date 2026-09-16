@@ -37,7 +37,7 @@ import os
 import httpx
 from dotenv import load_dotenv
 
-from app.retrieval.llm import LLMError
+from app.retrieval.llm import LLMError, _require_nonempty_prompt
 
 # Mirrors main.py's own load_dotenv() call, so this module also works
 # standalone (scripts, tests) without depending on main having run first.
@@ -95,8 +95,7 @@ def generate_answer(
             unparseable body, or a candidate with no usable text — e.g.
             blocked by Gemini's safety filters).
     """
-    if not isinstance(prompt, str) or not prompt.strip():
-        raise ValueError("prompt must be a non-empty string")
+    _require_nonempty_prompt(prompt)
 
     key = api_key if api_key is not None else os.environ.get("GEMINI_API_KEY")
     if not key or not key.strip():
@@ -125,14 +124,18 @@ def generate_answer(
     except httpx.RequestError as exc:
         raise GeminiError(f"Could not reach Gemini ({exc!s}).") from exc
 
-    if _is_auth_error(response):
-        raise GeminiAuthError(
-            f"Gemini rejected the API key ({_error_detail(response)})."
-        )
     if response.status_code >= 400:
+        # Parsed once and threaded through both helpers below, instead of
+        # each re-parsing the same response body from scratch.
+        error_body = _try_json(response)
+        if _is_auth_error(response.status_code, error_body):
+            raise GeminiAuthError(
+                f"Gemini rejected the API key "
+                f"({_error_detail(response, error_body)})."
+            )
         raise GeminiError(
             f"Gemini returned HTTP {response.status_code}: "
-            f"{_error_detail(response)}"
+            f"{_error_detail(response, error_body)}"
         )
 
     try:
@@ -151,36 +154,52 @@ def generate_answer(
             f"(promptFeedback={data.get('promptFeedback')!r}): {data!r}"
         )
 
-    parts = candidates[0].get("content", {}).get("parts", [])
-    text = "".join(part.get("text", "") for part in parts).strip()
+    # `or {}` / `or []` / `or ""`, not `.get(key, default)`, throughout:
+    # a key can be explicitly `null` (e.g. content of a safety-blocked
+    # candidate) as well as absent, and `.get(key, default)` only
+    # substitutes the default for the latter.
+    parts = (candidates[0].get("content") or {}).get("parts") or []
+    text = "".join(part.get("text") or "" for part in parts).strip()
     if not text:
         raise GeminiError(f"Gemini candidate had no text: {candidates[0]!r}")
 
     return text
 
 
-def _is_auth_error(response: httpx.Response) -> bool:
-    """Whether `response` reports a missing/invalid/unauthorized API key."""
-    if response.status_code in (401, 403):
+def _try_json(response: httpx.Response):
+    """Parse `response`'s body as JSON, or None if it isn't valid JSON."""
+    try:
+        return response.json()
+    except ValueError:
+        return None
+
+
+def _is_auth_error(status_code: int, body) -> bool:
+    """Whether an error response reports a missing/invalid/unauthorized key.
+
+    `body` is the response's already-parsed JSON (see `_try_json`), or
+    None if it wasn't valid JSON.
+    """
+    if status_code in (401, 403):
         return True
-    if response.status_code == 400:
-        try:
-            body = response.json()
-        except ValueError:
-            return False
-        message = str(body.get("error", {}).get("message", "")).lower()
-        return "api key" in message
+    if status_code == 400 and isinstance(body, dict):
+        error = body.get("error")
+        message = error.get("message") if isinstance(error, dict) else None
+        return "api key" in str(message or "").lower()
     return False
 
 
-def _error_detail(response: httpx.Response) -> str:
-    """Best-effort human-readable detail from an error response."""
-    try:
-        body = response.json()
-    except ValueError:
+def _error_detail(response: httpx.Response, body=None) -> str:
+    """Best-effort human-readable detail from an error response.
+
+    `body` is the response's already-parsed JSON (see `_try_json`); pass
+    None (the default) to fall back to the raw response text, which also
+    covers a body that parsed but wasn't a dict.
+    """
+    if not isinstance(body, dict):
         return response.text[:200]
-    if isinstance(body, dict) and isinstance(body.get("error"), dict):
+    if isinstance(body.get("error"), dict):
         return str(body["error"].get("message", body["error"]))
-    if isinstance(body, dict) and "error" in body:
+    if "error" in body:
         return str(body["error"])
     return str(body)[:200]
