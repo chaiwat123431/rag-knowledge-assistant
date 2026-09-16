@@ -6,7 +6,7 @@
 export type Language = "en" | "fr";
 
 const en = {
-  appTitle: "RAG Assistant",
+  appTitle: "RAG Knowledge Assistant",
   newConversation: "New conversation",
   switchLanguage: "Switch language",
   emptyState:
@@ -49,7 +49,7 @@ type Dict = {
 };
 
 const fr: Dict = {
-  appTitle: "RAG Assistant",
+  appTitle: "RAG Knowledge Assistant",
   newConversation: "Nouvelle conversation",
   switchLanguage: "Changer de langue",
   emptyState:

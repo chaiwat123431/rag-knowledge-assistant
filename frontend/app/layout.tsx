@@ -17,7 +17,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "RAG Assistant",
+  title: "RAG Knowledge Assistant",
   description: "Ask questions about your documents.",
 };
 

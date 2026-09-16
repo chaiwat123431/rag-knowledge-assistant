@@ -1,4 +1,4 @@
-# RAG Assistant — frontend
+# RAG Knowledge Assistant — frontend
 
 Minimal Next.js (App Router) + TypeScript + Tailwind UI for the backend in
 `../backend`. One page: upload a document, then ask questions about it with

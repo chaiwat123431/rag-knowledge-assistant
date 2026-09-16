@@ -23,7 +23,7 @@ ALLOWED_ORIGINS = [
     if origin.strip()
 ]
 
-app = FastAPI(title="RAG Assistant")
+app = FastAPI(title="RAG Knowledge Assistant")
 
 app.add_middleware(
     CORSMiddleware,
