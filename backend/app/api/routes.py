@@ -45,6 +45,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Callable
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 
@@ -292,9 +293,18 @@ def ingest_document(
 
     try:
         store.add_documents(chunks, source=file.filename)
-    except OSError as exc:
+    except (OSError, httpx.HTTPError) as exc:
         # e.g. the embedding model can't be fetched on first ingest, or a
         # Chroma write fails — backend not ready, not the client's fault.
+        # Both exception types matter: `httpx.HTTPError` (the ONNX model
+        # download's own failure mode — chromadb's ONNXMiniLM_L6_V2 uses
+        # httpx internally) is NOT an OSError subclass, unlike
+        # `requests.exceptions.ConnectionError`, which the old
+        # sentence-transformers/huggingface_hub download path raised and
+        # this handler was originally written to catch. Verified directly
+        # (`issubclass(httpx.ConnectError, OSError)` is False) rather than
+        # assumed — a network hiccup during that download used to 500
+        # bare and undiagnosed here before this fix.
         raise HTTPException(
             status_code=503,
             detail=f"could not index document (backend unavailable): {exc}",

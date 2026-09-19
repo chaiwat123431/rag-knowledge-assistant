@@ -1,5 +1,4 @@
 import math
-import shutil
 import threading
 
 import pytest
@@ -56,7 +55,7 @@ def test_get_model_is_fully_warm_before_being_returned(monkeypatch):
 
 
 @pytest.mark.model
-def test_get_model_concurrent_first_calls_do_not_race(monkeypatch):
+def test_get_model_concurrent_first_calls_do_not_race(monkeypatch, tmp_path):
     """Regression test: with only the cheap object construction inside
     `_model_lock` (not the deferred download/tokenizer/session-build),
     two threads racing in on a cold model would both hold the same
@@ -67,10 +66,24 @@ def test_get_model_concurrent_first_calls_do_not_race(monkeypatch):
 
     Needs a genuinely cold on-disk cache to be a meaningful regression
     test -- with a warm cache there's nothing to race on, and this would
-    pass even against the bug it's meant to catch.
+    pass even against the bug it's meant to catch. Points
+    `ONNXMiniLM_L6_V2.DOWNLOAD_PATH` (a class attribute) at `tmp_path`
+    instead of clearing the real one -- an earlier version of this test
+    `shutil.rmtree`'d the real, shared, machine-wide
+    `~/.cache/chroma/onnx_models` directory, destroying any legitimately
+    cached model for every other process/CI run on the machine. Patching
+    the class attribute forces the same genuinely-cold-cache download
+    race, isolated to a throwaway directory `monkeypatch` cleans up
+    automatically.
     """
+    from chromadb.utils.embedding_functions import ONNXMiniLM_L6_V2
+
     monkeypatch.setattr(embeddings_module, "_model", None)
-    shutil.rmtree(_onnx_download_path(), ignore_errors=True)
+    monkeypatch.setattr(
+        ONNXMiniLM_L6_V2,
+        "DOWNLOAD_PATH",
+        tmp_path / "onnx_models" / ONNXMiniLM_L6_V2.MODEL_NAME,
+    )
 
     errors = []
     results = []
@@ -93,12 +106,6 @@ def test_get_model_concurrent_first_calls_do_not_race(monkeypatch):
 
     assert errors == []
     assert results == [EMBEDDING_DIM] * 8
-
-
-def _onnx_download_path():
-    from chromadb.utils.embedding_functions import ONNXMiniLM_L6_V2
-
-    return ONNXMiniLM_L6_V2.DOWNLOAD_PATH
 
 
 def test_embed_empty_list_returns_empty_list_without_loading_model(monkeypatch):

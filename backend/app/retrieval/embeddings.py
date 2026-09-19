@@ -172,6 +172,22 @@ def _warn_on_truncation(model, texts: list[str]) -> None:
     disabled. A `tokenizers.Encoding`'s `overflowing` list is non-empty
     exactly when its input didn't fit and got cut — a direct signal, not
     inferred from the (always-256, due to padding) encoded length.
+
+    Unlike the old sentence-transformers-based version, this doesn't
+    report *how many* tokens a text was over the limit by — two ways of
+    recovering that were tried and both gave wrong numbers, verified
+    empirically, not assumed: (1) summing `overflowing`'s pieces plateaus
+    at a fixed size regardless of true input length (a 400-word and a
+    1000-word input both reported the same total); (2) loading a second,
+    non-truncating `Tokenizer` from the same `tokenizer.json` didn't
+    actually come back untruncated — the file has its own baked-in
+    length limit, so it reported the same fixed count for every input
+    length, including short ones well under any limit. Getting an
+    accurate count would mean re-tokenising with a library-internal
+    detail (the raw pre-processor config) this project doesn't otherwise
+    need — not worth it for a log message's nice-to-have magnitude when
+    "it was truncated" (which chunk, which document) is the actionable
+    part.
     """
     if not logger.isEnabledFor(logging.WARNING):
         return
