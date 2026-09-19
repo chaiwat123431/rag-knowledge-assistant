@@ -2,13 +2,35 @@
 
 import os
 
+from dotenv import load_dotenv
+from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+
+from app.api.routes import LLMProviderConfigError, router
+
+# Load backend/.env if present (uvicorn doesn't do this itself), so the
+# vars documented in .env.example actually take effect.
+load_dotenv()
+
 # setdefault, not a plain assignment: an operator-set value (Render
-# dashboard env var, or .env via load_dotenv() below — both already
-# present in os.environ by the time either runs) always wins. Must happen
-# before anything below has a chance to import onnxruntime/tokenizers —
-# neither currently does at module import time (embeddings.py loads the
-# model lazily, on the first real request), but setting this first,
-# before any other import, keeps that true regardless of future changes.
+# dashboard env var, or the .env just loaded above) always wins over this
+# hardcoded default. Must run AFTER load_dotenv(), not before:
+# load_dotenv()'s default `override=False` only fills keys still absent
+# from os.environ, so claiming these two first (an earlier version of
+# this file did) makes it silently ignore a value set in .env — verified
+# in isolation (test_health.py), though not currently reachable through
+# this app specifically: app.retrieval.gemini independently calls
+# load_dotenv() too (so it also works standalone, e.g. in scripts), which
+# means .env is already loaded as a side effect of `from app.api.routes
+# import ...` above, before either ordering of the two lines below would
+# matter. This fix removes reliance on that unrelated module's side
+# effect for correctness rather than leaving it as the only thing making
+# this work. No ordering requirement relative to the imports above:
+# nothing in this module (or anything it imports) touches
+# onnxruntime/tokenizers at import time — embeddings.py loads the model
+# lazily, on the first real request — so being anywhere before that
+# first request is enough.
 #
 # Caps onnxruntime/tokenizers' internal thread pools for a small,
 # low-vCPU deploy target (e.g. Render's 512MB Starter plan) — see
@@ -18,17 +40,6 @@ import os
 # actually brought memory usage under budget).
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
-
-from dotenv import load_dotenv  # noqa: E402
-from fastapi import FastAPI, Request  # noqa: E402
-from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
-from fastapi.responses import JSONResponse  # noqa: E402
-
-from app.api.routes import LLMProviderConfigError, router  # noqa: E402
-
-# Load backend/.env if present (uvicorn doesn't do this itself), so the
-# vars documented in .env.example actually take effect.
-load_dotenv()
 
 # The frontend (Next.js dev server) runs on a different origin, so the
 # browser needs these allowed explicitly. Override for other hosts with

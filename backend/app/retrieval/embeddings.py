@@ -79,6 +79,27 @@ def _get_model():
     `_model`; only the first callers (while it's still None) take the lock,
     and the inner re-check means exactly one of them builds the model.
 
+    `ONNXMiniLM_L6_V2()` itself is cheap (no I/O) — unlike the old
+    `SentenceTransformer(MODEL_NAME)` it replaced, which did the download
+    *and* the load in that one blocking call. Here, the expensive part
+    (downloading the ~90MB model if it isn't cached yet, parsing
+    tokenizer.json, building the ONNX Runtime session) is deferred to
+    first *use* — the `.tokenizer` / `.model` cached properties and
+    `_download_model_if_not_exists()`, all triggered by calling the
+    object, not by constructing it. If that work were left to happen on
+    the caller's first real `model(texts)` call, two threads racing in on
+    a cold cache (FastAPI runs sync routes in a threadpool) would both
+    already hold the same cached `_model` object and call it concurrently
+    — outside this lock, since by then `_model` is no longer `None` for
+    either of them — racing on the same on-disk download/extract path.
+    Reproduced directly: one thread got a valid model, the other an
+    `InvalidProtobuf` error from a torn concurrent write. Forcing a
+    throwaway embed here, still holding the lock, makes the model fully
+    warm (downloaded, tokenizer loaded, ONNX session built) before it's
+    ever assigned to `_model` — so no caller, however many threads arrive
+    concurrently afterward, can observe or trigger that first-use cost
+    again.
+
     `chromadb.utils.embedding_functions` is imported here rather than at
     module top level so that importing this module doesn't pull in
     onnxruntime or trigger a model download until an embedding is actually
@@ -90,7 +111,9 @@ def _get_model():
             if _model is None:
                 from chromadb.utils.embedding_functions import ONNXMiniLM_L6_V2
 
-                _model = ONNXMiniLM_L6_V2()
+                model = ONNXMiniLM_L6_V2()
+                model(["warm-up"])  # force the download/tokenizer/session
+                _model = model
     return _model
 
 

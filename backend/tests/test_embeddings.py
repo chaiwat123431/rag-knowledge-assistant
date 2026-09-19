@@ -1,4 +1,6 @@
 import math
+import shutil
+import threading
 
 import pytest
 
@@ -30,6 +32,73 @@ def test_embed_multiple_texts_returns_one_vector_per_input():
 
     assert len(result) == len(texts)
     assert all(len(vector) == EMBEDDING_DIM for vector in result)
+
+
+@pytest.mark.model
+def test_get_model_is_fully_warm_before_being_returned(monkeypatch):
+    """Regression test: `ONNXMiniLM_L6_V2()` itself is cheap (no I/O) --
+    unlike the old `SentenceTransformer(...)` it replaced, which did the
+    download *and* the load in one blocking call. If `_get_model()`
+    returned before forcing a throwaway embed, the first real caller's
+    access to `model.tokenizer` (e.g. `_warn_on_truncation`, called before
+    the model is ever embedded with) could hit the ONNX model's files
+    before they were ever downloaded. Reproduced directly against a
+    cleared cache before this fix: `Exception: No such file or directory`.
+    """
+    monkeypatch.setattr(embeddings_module, "_model", None)
+
+    model = embeddings_module._get_model()
+
+    # Must not raise -- the tokenizer's files must already be on disk and
+    # its cached_property already populated.
+    encoding = model.tokenizer.encode("a short sentence")
+    assert encoding is not None
+
+
+@pytest.mark.model
+def test_get_model_concurrent_first_calls_do_not_race(monkeypatch):
+    """Regression test: with only the cheap object construction inside
+    `_model_lock` (not the deferred download/tokenizer/session-build),
+    two threads racing in on a cold model would both hold the same
+    `_model` object and call it concurrently, *outside* the lock --
+    racing on the same on-disk download/extract path. Reproduced
+    directly, cache cleared first: one thread got a valid model, another
+    an onnxruntime `InvalidProtobuf` error from a torn concurrent write.
+
+    Needs a genuinely cold on-disk cache to be a meaningful regression
+    test -- with a warm cache there's nothing to race on, and this would
+    pass even against the bug it's meant to catch.
+    """
+    monkeypatch.setattr(embeddings_module, "_model", None)
+    shutil.rmtree(_onnx_download_path(), ignore_errors=True)
+
+    errors = []
+    results = []
+    results_lock = threading.Lock()
+
+    def worker(i):
+        try:
+            vectors = embed_texts([f"thread {i} text"])
+            with results_lock:
+                results.append(len(vectors[0]))
+        except Exception as exc:  # the whole point: nothing may raise here
+            with results_lock:
+                errors.append(exc)
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert errors == []
+    assert results == [EMBEDDING_DIM] * 8
+
+
+def _onnx_download_path():
+    from chromadb.utils.embedding_functions import ONNXMiniLM_L6_V2
+
+    return ONNXMiniLM_L6_V2.DOWNLOAD_PATH
 
 
 def test_embed_empty_list_returns_empty_list_without_loading_model(monkeypatch):
