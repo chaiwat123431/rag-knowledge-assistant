@@ -2,14 +2,38 @@
 
 Turns chunks of text (produced by `app.ingestion.chunker`) into dense
 vectors for similarity search. Per the updated Architecture Decisions in
-PLANNING.md, embeddings run locally via `sentence-transformers` (model
-`all-MiniLM-L6-v2`) instead of a paid embedding API — no key, no network
-call per request, no per-token cost.
+PLANNING.md, embeddings run locally via the `all-MiniLM-L6-v2` model —
+no key, no network call per request, no per-token cost.
+
+Runtime: ONNX, not PyTorch (2026-09)
+-------------------------------------
+Originally loaded via `sentence-transformers` (PyTorch). Measured on
+Render's 512MB Starter plan: a real add-document-then-query cycle peaked
+at ~560-650MB resident, over the container's entire memory budget by
+itself — the PyTorch runtime import alone costs ~400MB regardless of the
+~90MB model weights (a smaller sentence-transformers model wouldn't have
+helped; the runtime, not the weights, was the cost). Switched to
+`chromadb.utils.embedding_functions.ONNXMiniLM_L6_V2` — the *same*
+all-MiniLM-L6-v2 weights, exported to ONNX and run via ONNX Runtime
+instead of PyTorch. Same measurement: ~305-354MB, comfortably inside the
+budget. No new dependency: `onnxruntime` already ships as a transitive
+dependency of `chromadb`, which this project already depends on.
+
+This is a runtime swap, not a different or quantized model: verified
+directly (not assumed) that the two runtimes produce numerically
+equivalent vectors for the same input — max absolute difference
+0.000000 and cosine similarity 1.0 across a sample of the project's own
+test texts (short/long, related/unrelated pairs), full backend suite
+(including every `@pytest.mark.model` test exercising the
+`MIN_RELEVANCE_SCORE` / `MAX_AUGMENTED_SCORE_DROP_RATIO` /
+`MIN_CROSS_SOURCE_RATIO` thresholds against real embeddings) re-run and
+passing unchanged. No threshold recalibration was needed as a result.
 
 Model loading
 -------------
-`all-MiniLM-L6-v2` is ~90 MB, takes a noticeable moment to load into
-memory, and downloads from the Hugging Face hub on first ever use. It is
+The model is ~90MB and downloads on first ever use — from Chroma's own
+hosted artifact (`chroma-onnx-models.s3.amazonaws.com`), not the Hugging
+Face hub (that was specific to the old sentence-transformers path). It is
 loaded exactly once per process, lazily, on the first `embed_texts` call
 that actually has something to embed:
 
@@ -20,21 +44,20 @@ that actually has something to embed:
 - Once, via a module-level `_model` global populated with double-checked
   locking. A bare `if _model is None` guard is not enough on its own —
   FastAPI runs sync routes in a threadpool, so two requests arriving
-  before the model is warm would both run `SentenceTransformer(...)`,
-  racing on the shared Hugging Face cache directory (concurrent downloads
-  to the same path) and briefly holding two full model copies in RAM. The
-  lock makes the cold path strictly one-at-a-time; the warm path stays a
-  plain unlocked read.
+  before the model is warm would both run `ONNXMiniLM_L6_V2()`, racing on
+  the shared download-cache directory and briefly holding two full model
+  copies in RAM. The lock makes the cold path strictly one-at-a-time; the
+  warm path stays a plain unlocked read.
 
 Sequence length
 ---------------
-`all-MiniLM-L6-v2` has a max input of 256 word-piece tokens. `encode()`
-*silently truncates* anything longer, so text past that point doesn't
-influence the vector — a ~500-character chunk of CJK text or whitespace-
-free content can tokenize well past 256. Keeping inputs under the limit is
-really the chunker's job, but `embed_texts` logs a WARNING (per offending
-index) when it sees an over-limit input, so a truncated embedding isn't
-completely invisible.
+`all-MiniLM-L6-v2` has a max input of 256 word-piece tokens. The
+tokenizer *silently truncates* anything longer (verified: an over-limit
+input does not raise, it just loses its tail) — a ~500-character chunk of
+CJK text or whitespace-free content can tokenize well past 256. Keeping
+inputs under the limit is really the chunker's job, but `embed_texts`
+logs a WARNING (per offending index) when it sees an over-limit input, so
+a truncated embedding isn't completely invisible.
 """
 
 import logging
@@ -56,17 +79,18 @@ def _get_model():
     `_model`; only the first callers (while it's still None) take the lock,
     and the inner re-check means exactly one of them builds the model.
 
-    `sentence_transformers` is imported here rather than at module top
-    level so that importing this module doesn't pull in torch/transformers
-    or trigger a model download until an embedding is actually requested.
+    `chromadb.utils.embedding_functions` is imported here rather than at
+    module top level so that importing this module doesn't pull in
+    onnxruntime or trigger a model download until an embedding is actually
+    requested.
     """
     global _model
     if _model is None:
         with _model_lock:
             if _model is None:
-                from sentence_transformers import SentenceTransformer
+                from chromadb.utils.embedding_functions import ONNXMiniLM_L6_V2
 
-                _model = SentenceTransformer(MODEL_NAME)
+                _model = ONNXMiniLM_L6_V2()
     return _model
 
 
@@ -111,33 +135,32 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
 
     model = _get_model()
     _warn_on_truncation(model, texts)
-    embeddings = model.encode(texts)
-    return embeddings.tolist()
+    embeddings = model(texts)
+    return [vector.tolist() for vector in embeddings]
 
 
 def _warn_on_truncation(model, texts: list[str]) -> None:
-    """Log a WARNING for any text that `model.encode` will truncate.
+    """Log a WARNING for any text that `model`'s tokenizer will truncate.
 
-    `encode` truncates silently; this makes the loss visible without
-    changing behaviour. The whole batch is tokenised in one call (the same
-    work `encode` does internally, once), and the check is skipped when
-    WARNING is disabled.
+    Truncation happens silently in the embedding call itself; this makes
+    the loss visible without changing behaviour. The whole batch is
+    tokenised in one call (`encode_batch`, the same work the embedding
+    call does internally), and the check is skipped when WARNING is
+    disabled. A `tokenizers.Encoding`'s `overflowing` list is non-empty
+    exactly when its input didn't fit and got cut — a direct signal, not
+    inferred from the (always-256, due to padding) encoded length.
     """
     if not logger.isEnabledFor(logging.WARNING):
         return
 
-    max_tokens = model.max_seq_length
-    if not max_tokens:
-        return
-
-    token_ids_per_text = model.tokenizer(texts, truncation=False)["input_ids"]
-    for i, token_ids in enumerate(token_ids_per_text):
-        if len(token_ids) > max_tokens:
+    encodings = model.tokenizer.encode_batch(texts)
+    max_tokens = model.max_tokens()
+    for i, encoding in enumerate(encodings):
+        if encoding.overflowing:
             logger.warning(
-                "texts[%d] is %d tokens, over the %s %d-token limit; "
-                "it will be truncated and its tail won't affect the embedding",
+                "texts[%d] is over the %s %d-token limit; it will be "
+                "truncated and its tail won't affect the embedding",
                 i,
-                len(token_ids),
                 MODEL_NAME,
                 max_tokens,
             )

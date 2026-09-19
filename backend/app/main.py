@@ -5,15 +5,17 @@ import os
 # setdefault, not a plain assignment: an operator-set value (Render
 # dashboard env var, or .env via load_dotenv() below — both already
 # present in os.environ by the time either runs) always wins. Must happen
-# before anything below has a chance to import torch/tokenizers — neither
-# currently does at module import time (embeddings.py loads the model
-# lazily, on the first real request), but setting this first, before any
-# other import, keeps that true regardless of future changes.
+# before anything below has a chance to import onnxruntime/tokenizers —
+# neither currently does at module import time (embeddings.py loads the
+# model lazily, on the first real request), but setting this first,
+# before any other import, keeps that true regardless of future changes.
 #
-# Caps PyTorch/tokenizers' internal thread pools for a small, low-vCPU
-# deploy target (e.g. Render's 512MB Starter plan) — see .env.example for
-# what this does and, importantly, does NOT do (it does not reduce peak
-# memory; see PLANNING.md for the measurements behind that).
+# Caps onnxruntime/tokenizers' internal thread pools for a small,
+# low-vCPU deploy target (e.g. Render's 512MB Starter plan) — see
+# .env.example for what this does and, importantly, does NOT do (it does
+# not reduce peak memory; see PLANNING.md for the measurements behind
+# that and the separate change — embeddings.py's ONNX runtime — that
+# actually brought memory usage under budget).
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
