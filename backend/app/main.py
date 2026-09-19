@@ -2,12 +2,27 @@
 
 import os
 
-from dotenv import load_dotenv
-from fastapi import FastAPI, Request
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+# setdefault, not a plain assignment: an operator-set value (Render
+# dashboard env var, or .env via load_dotenv() below — both already
+# present in os.environ by the time either runs) always wins. Must happen
+# before anything below has a chance to import torch/tokenizers — neither
+# currently does at module import time (embeddings.py loads the model
+# lazily, on the first real request), but setting this first, before any
+# other import, keeps that true regardless of future changes.
+#
+# Caps PyTorch/tokenizers' internal thread pools for a small, low-vCPU
+# deploy target (e.g. Render's 512MB Starter plan) — see .env.example for
+# what this does and, importantly, does NOT do (it does not reduce peak
+# memory; see PLANNING.md for the measurements behind that).
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
-from app.api.routes import LLMProviderConfigError, router
+from dotenv import load_dotenv  # noqa: E402
+from fastapi import FastAPI, Request  # noqa: E402
+from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
+from fastapi.responses import JSONResponse  # noqa: E402
+
+from app.api.routes import LLMProviderConfigError, router  # noqa: E402
 
 # Load backend/.env if present (uvicorn doesn't do this itself), so the
 # vars documented in .env.example actually take effect.
