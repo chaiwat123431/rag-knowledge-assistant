@@ -1,4 +1,5 @@
 import math
+import threading
 
 import pytest
 
@@ -30,6 +31,114 @@ def test_embed_multiple_texts_returns_one_vector_per_input():
 
     assert len(result) == len(texts)
     assert all(len(vector) == EMBEDDING_DIM for vector in result)
+
+
+@pytest.mark.model
+def test_get_model_is_fully_warm_before_being_returned(monkeypatch):
+    """Regression test: `ONNXMiniLM_L6_V2()` itself is cheap (no I/O) --
+    unlike the old `SentenceTransformer(...)` it replaced, which did the
+    download *and* the load in one blocking call. If `_get_model()`
+    returned before forcing a throwaway embed, the first real caller's
+    access to `model.tokenizer` (e.g. `_warn_on_truncation`, called before
+    the model is ever embedded with) could hit the ONNX model's files
+    before they were ever downloaded. Reproduced directly against a
+    cleared cache before this fix: `Exception: No such file or directory`.
+    """
+    monkeypatch.setattr(embeddings_module, "_model", None)
+
+    model = embeddings_module._get_model()
+
+    # Must not raise -- the tokenizer's files must already be on disk and
+    # its cached_property already populated.
+    encoding = model.tokenizer.encode("a short sentence")
+    assert encoding is not None
+
+
+def test_get_model_normalizes_any_warm_up_failure(monkeypatch):
+    """Regression test: three /code-review rounds each found one more
+    concrete exception type routes.py's except-clauses missed for a
+    model-download failure (a plain OSError, then httpx.HTTPError, then a
+    ValueError from chromadb's own SHA256-mismatch check) -- catching
+    them one at a time there wasn't exhaustive. `_get_model()` now
+    catches *any* exception from the forced warm-up call and normalizes
+    it into `EmbeddingUnavailableError`, so callers only ever need to
+    catch one type regardless of which concrete library failure caused
+    it. Uses a `ValueError` here specifically -- not an `OSError` or
+    `httpx.HTTPError`, the two types already found -- to prove this
+    covers the whole exception surface, not just those two.
+
+    No @pytest.mark.model / real network needed: ONNXMiniLM_L6_V2()
+    itself does no I/O (see test_get_model_is_fully_warm_before_being_
+    returned above), so patching its __call__ to fail is enough to
+    exercise _get_model()'s wrapping without ever downloading anything.
+    """
+    from chromadb.utils.embedding_functions import ONNXMiniLM_L6_V2
+
+    def broken_call(self, texts):
+        raise ValueError("simulated SHA256 mismatch")
+
+    monkeypatch.setattr(embeddings_module, "_model", None)
+    monkeypatch.setattr(ONNXMiniLM_L6_V2, "__call__", broken_call)
+
+    with pytest.raises(embeddings_module.EmbeddingUnavailableError) as excinfo:
+        embeddings_module._get_model()
+
+    assert isinstance(excinfo.value, OSError)
+    assert "simulated SHA256 mismatch" in str(excinfo.value)
+
+
+@pytest.mark.model
+def test_get_model_concurrent_first_calls_do_not_race(monkeypatch, tmp_path):
+    """Regression test: with only the cheap object construction inside
+    `_model_lock` (not the deferred download/tokenizer/session-build),
+    two threads racing in on a cold model would both hold the same
+    `_model` object and call it concurrently, *outside* the lock --
+    racing on the same on-disk download/extract path. Reproduced
+    directly, cache cleared first: one thread got a valid model, another
+    an onnxruntime `InvalidProtobuf` error from a torn concurrent write.
+
+    Needs a genuinely cold on-disk cache to be a meaningful regression
+    test -- with a warm cache there's nothing to race on, and this would
+    pass even against the bug it's meant to catch. Points
+    `ONNXMiniLM_L6_V2.DOWNLOAD_PATH` (a class attribute) at `tmp_path`
+    instead of clearing the real one -- an earlier version of this test
+    `shutil.rmtree`'d the real, shared, machine-wide
+    `~/.cache/chroma/onnx_models` directory, destroying any legitimately
+    cached model for every other process/CI run on the machine. Patching
+    the class attribute forces the same genuinely-cold-cache download
+    race, isolated to a throwaway directory `monkeypatch` cleans up
+    automatically.
+    """
+    from chromadb.utils.embedding_functions import ONNXMiniLM_L6_V2
+
+    monkeypatch.setattr(embeddings_module, "_model", None)
+    monkeypatch.setattr(
+        ONNXMiniLM_L6_V2,
+        "DOWNLOAD_PATH",
+        tmp_path / "onnx_models" / ONNXMiniLM_L6_V2.MODEL_NAME,
+    )
+
+    errors = []
+    results = []
+    results_lock = threading.Lock()
+
+    def worker(i):
+        try:
+            vectors = embed_texts([f"thread {i} text"])
+            with results_lock:
+                results.append(len(vectors[0]))
+        except Exception as exc:  # the whole point: nothing may raise here
+            with results_lock:
+                errors.append(exc)
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert errors == []
+    assert results == [EMBEDDING_DIM] * 8
 
 
 def test_embed_empty_list_returns_empty_list_without_loading_model(monkeypatch):

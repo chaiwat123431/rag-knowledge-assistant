@@ -10,6 +10,7 @@ from app.api.routes import (
 from app.main import app
 from app.retrieval import gemini
 from app.retrieval import llm as ollama_llm
+from app.retrieval.embeddings import EmbeddingUnavailableError
 from app.retrieval.gemini import GeminiAuthError
 from app.retrieval.llm import (
     OllamaModelNotFoundError,
@@ -355,6 +356,28 @@ def test_query_gemini_auth_error_returns_500_not_503(client):
 
     assert response.status_code == 500
     assert "api key" in response.json()["detail"].lower()
+
+
+def test_query_embedding_download_failure_returns_503(client):
+    # Regression test: every /query call embeds the question
+    # (VectorStore.query), so a cold-start embedding-model download
+    # hiccup is at least as reachable here as on /documents (which this
+    # exact fix was already applied to) -- confirmed via /code-review
+    # that without it, this fell through to a bare, undiagnosed 500.
+    # Raises EmbeddingUnavailableError, not e.g. httpx.ConnectError
+    # directly: that's the actual, normalized contract embeddings.py's
+    # _get_model() now guarantees regardless of which concrete library
+    # exception caused the download to fail (see its module docstring).
+    class StoreThatFailsToEmbed:
+        def query(self, question, top_k=5):
+            raise EmbeddingUnavailableError("simulated network failure")
+
+    c = client(StoreThatFailsToEmbed())
+
+    response = c.post("/query", json={"question": "a real question"})
+
+    assert response.status_code == 503
+    assert "backend unavailable" in response.json()["detail"].lower()
 
 
 # --- /query conversation history --------------------------------------------

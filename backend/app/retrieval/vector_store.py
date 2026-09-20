@@ -85,9 +85,9 @@ def _get_collection(persist_dir: Path):
                 )
                 collection = client.get_or_create_collection(
                     name=COLLECTION_NAME,
-                    # Cosine matches how sentence-transformers embeddings
-                    # are meant to be compared; query() turns the distance
-                    # into a 1 - d similarity score.
+                    # Cosine matches how all-MiniLM-L6-v2 embeddings are
+                    # meant to be compared (see embeddings.py); query()
+                    # turns the distance into a 1 - d similarity score.
                     metadata={"hnsw:space": "cosine"},
                 )
                 _collections[key] = collection

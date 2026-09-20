@@ -3,7 +3,6 @@ uvicorn
 python-multipart
 langchain
 chromadb
-sentence-transformers
 httpx
 pypdf
 python-dotenv

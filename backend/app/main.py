@@ -13,6 +13,25 @@ from app.api.routes import LLMProviderConfigError, router
 # vars documented in .env.example actually take effect.
 load_dotenv()
 
+# What these two vars are for and why: see .env.example, the canonical
+# explanation (not restated here to avoid two copies drifting apart).
+#
+# setdefault, not a plain assignment, so an operator-set value (Render
+# dashboard env var, or the .env just loaded above) always wins over this
+# hardcoded fallback. Must run AFTER load_dotenv(), not before:
+# load_dotenv()'s default `override=False` only fills keys still absent
+# from os.environ, so claiming these two first (an earlier version of
+# this file did) silently ignores a value set in .env — verified in
+# isolation (test_health.py), though not currently reachable through
+# this app specifically: app.retrieval.gemini independently calls
+# load_dotenv() too (so it also works standalone, e.g. in scripts), which
+# means .env is already loaded as a side effect of `from app.api.routes
+# import ...` above, before either ordering of these two lines would
+# matter. Fixed anyway — this file's correctness shouldn't depend on an
+# unrelated module's side effect.
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
 # The frontend (Next.js dev server) runs on a different origin, so the
 # browser needs these allowed explicitly. Override for other hosts with
 # FRONTEND_ORIGINS (comma-separated). `or` (not the getenv default) so a
