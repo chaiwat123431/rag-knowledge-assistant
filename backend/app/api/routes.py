@@ -46,7 +46,6 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Callable
 
-import httpx
 from fastapi import APIRouter, Depends, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 
@@ -227,14 +226,12 @@ def query(
         # Backend unreachable, timed out, or erroring server-side — a
         # transient problem, not a client error; retrying later may work.
         raise HTTPException(status_code=503, detail=str(exc)) from exc
-    except (OSError, httpx.HTTPError) as exc:
+    except OSError as exc:
         # The embedding model's cold-start download (every VectorStore.query
         # call embeds the question) can fail the same way ingest_document's
         # identical catch below handles — see that comment. Every query
         # embeds a question via VectorStore.query, so this path is at least
-        # as likely to hit a cold-cache download hiccup as /documents is;
-        # verified directly that without this, the failure fell through to
-        # a bare, undiagnosed 500 instead of this 503.
+        # as likely to hit a cold-cache download hiccup as /documents is.
         raise HTTPException(
             status_code=503,
             detail=f"could not process query (backend unavailable): {exc}",
@@ -306,18 +303,18 @@ def ingest_document(
 
     try:
         store.add_documents(chunks, source=file.filename)
-    except (OSError, httpx.HTTPError) as exc:
+    except OSError as exc:
         # e.g. the embedding model can't be fetched on first ingest, or a
         # Chroma write fails — backend not ready, not the client's fault.
-        # Both exception types matter: `httpx.HTTPError` (the ONNX model
-        # download's own failure mode — chromadb's ONNXMiniLM_L6_V2 uses
-        # httpx internally) is NOT an OSError subclass, unlike
-        # `requests.exceptions.ConnectionError`, which the old
-        # sentence-transformers/huggingface_hub download path raised and
-        # this handler was originally written to catch. Verified directly
-        # (`issubclass(httpx.ConnectError, OSError)` is False) rather than
-        # assumed — a network hiccup during that download used to 500
-        # bare and undiagnosed here before this fix.
+        # A single type to catch, by design: embeddings.py's
+        # `EmbeddingUnavailableError` (an `OSError` subclass) normalizes
+        # every concrete failure mode of the model's first-ever download
+        # — after three /code-review rounds each finding one more
+        # concrete exception type this handler didn't catch (a plain
+        # OSError, then httpx.HTTPError, then a ValueError from a failed
+        # SHA256 check), catching them one at a time here turned out not
+        # to be exhaustive. See embeddings.py's "Download failures" for
+        # why that normalization belongs there, not here.
         raise HTTPException(
             status_code=503,
             detail=f"could not index document (backend unavailable): {exc}",

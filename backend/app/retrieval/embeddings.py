@@ -58,6 +58,25 @@ CJK text or whitespace-free content can tokenize well past 256. Keeping
 inputs under the limit is really the chunker's job, but `embed_texts`
 logs a WARNING (per offending index) when it sees an over-limit input, so
 a truncated embedding isn't completely invisible.
+
+Download failures: one exception type, not the library's own zoo
+-------------------------------------------------------------------
+The first-ever call downloads the model, and that download can fail in
+more than one way at the underlying library's level: `httpx.HTTPError`
+(network errors — the case `app.api.routes` was fixed to catch first),
+but also a plain `ValueError` if the SHA256 check fails after a
+corrupted/truncated download (retried 3 times, then raised), and
+`tarfile`'s own errors if the downloaded archive doesn't extract
+cleanly. Three `/code-review` rounds each found one more of these
+missing from `routes.py`'s exception handling, one at a time — an
+unsustainable way to stay exhaustive, since it requires every caller to
+independently track chromadb's/onnxruntime's/tokenizers' internal
+exception hierarchies. `_get_model()` now catches *any* exception from
+the forced warm-up call and re-raises it as `EmbeddingUnavailableError`
+(an `OSError` subclass, so a plain `except OSError` — what callers
+already had reason to catch, for a Chroma write failure — catches this
+too), normalizing every concrete failure mode into one type at the one
+place that actually knows what it's calling.
 """
 
 import logging
@@ -67,6 +86,15 @@ logger = logging.getLogger(__name__)
 
 MODEL_NAME = "all-MiniLM-L6-v2"
 EMBEDDING_DIM = 384  # fixed by the model architecture; asserted by the tests
+
+
+class EmbeddingUnavailableError(OSError):
+    """The embedding backend isn't ready — most commonly the model's
+    first-ever download failing (network error, a corrupted download
+    that fails its SHA256 check, a bad archive). See "Download failures"
+    in the module docstring for why this normalizes several distinct
+    underlying exception types into one.
+    """
 
 _model = None
 _model_lock = Lock()
@@ -104,6 +132,11 @@ def _get_model():
     module top level so that importing this module doesn't pull in
     onnxruntime or trigger a model download until an embedding is actually
     requested.
+
+    Raises:
+        EmbeddingUnavailableError: the warm-up call failed — see
+            "Download failures" in the module docstring for why this
+            catches (and normalizes) more than just network errors.
     """
     global _model
     if _model is None:
@@ -112,7 +145,18 @@ def _get_model():
                 from chromadb.utils.embedding_functions import ONNXMiniLM_L6_V2
 
                 model = ONNXMiniLM_L6_V2()
-                model(["warm-up"])  # force the download/tokenizer/session
+                try:
+                    model(["warm-up"])  # force the download/tokenizer/session
+                except Exception as exc:
+                    # Deliberately broad: this wraps exactly one call (the
+                    # forced warm-up embed, whose only job here is to
+                    # trigger the model's first-use cost), not a larger
+                    # block, so anything it raises means "the embedding
+                    # backend isn't ready" regardless of which concrete
+                    # library/exception type is responsible this time.
+                    raise EmbeddingUnavailableError(
+                        f"Could not load the embedding model: {exc}"
+                    ) from exc
                 _model = model
     return _model
 

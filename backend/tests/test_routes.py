@@ -1,4 +1,3 @@
-import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -11,6 +10,7 @@ from app.api.routes import (
 from app.main import app
 from app.retrieval import gemini
 from app.retrieval import llm as ollama_llm
+from app.retrieval.embeddings import EmbeddingUnavailableError
 from app.retrieval.gemini import GeminiAuthError
 from app.retrieval.llm import (
     OllamaModelNotFoundError,
@@ -364,9 +364,13 @@ def test_query_embedding_download_failure_returns_503(client):
     # hiccup is at least as reachable here as on /documents (which this
     # exact fix was already applied to) -- confirmed via /code-review
     # that without it, this fell through to a bare, undiagnosed 500.
+    # Raises EmbeddingUnavailableError, not e.g. httpx.ConnectError
+    # directly: that's the actual, normalized contract embeddings.py's
+    # _get_model() now guarantees regardless of which concrete library
+    # exception caused the download to fail (see its module docstring).
     class StoreThatFailsToEmbed:
         def query(self, question, top_k=5):
-            raise httpx.ConnectError("simulated network failure")
+            raise EmbeddingUnavailableError("simulated network failure")
 
     c = client(StoreThatFailsToEmbed())
 

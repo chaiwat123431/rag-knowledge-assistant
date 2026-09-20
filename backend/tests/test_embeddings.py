@@ -54,6 +54,39 @@ def test_get_model_is_fully_warm_before_being_returned(monkeypatch):
     assert encoding is not None
 
 
+def test_get_model_normalizes_any_warm_up_failure(monkeypatch):
+    """Regression test: three /code-review rounds each found one more
+    concrete exception type routes.py's except-clauses missed for a
+    model-download failure (a plain OSError, then httpx.HTTPError, then a
+    ValueError from chromadb's own SHA256-mismatch check) -- catching
+    them one at a time there wasn't exhaustive. `_get_model()` now
+    catches *any* exception from the forced warm-up call and normalizes
+    it into `EmbeddingUnavailableError`, so callers only ever need to
+    catch one type regardless of which concrete library failure caused
+    it. Uses a `ValueError` here specifically -- not an `OSError` or
+    `httpx.HTTPError`, the two types already found -- to prove this
+    covers the whole exception surface, not just those two.
+
+    No @pytest.mark.model / real network needed: ONNXMiniLM_L6_V2()
+    itself does no I/O (see test_get_model_is_fully_warm_before_being_
+    returned above), so patching its __call__ to fail is enough to
+    exercise _get_model()'s wrapping without ever downloading anything.
+    """
+    from chromadb.utils.embedding_functions import ONNXMiniLM_L6_V2
+
+    def broken_call(self, texts):
+        raise ValueError("simulated SHA256 mismatch")
+
+    monkeypatch.setattr(embeddings_module, "_model", None)
+    monkeypatch.setattr(ONNXMiniLM_L6_V2, "__call__", broken_call)
+
+    with pytest.raises(embeddings_module.EmbeddingUnavailableError) as excinfo:
+        embeddings_module._get_model()
+
+    assert isinstance(excinfo.value, OSError)
+    assert "simulated SHA256 mismatch" in str(excinfo.value)
+
+
 @pytest.mark.model
 def test_get_model_concurrent_first_calls_do_not_race(monkeypatch, tmp_path):
     """Regression test: with only the cheap object construction inside
