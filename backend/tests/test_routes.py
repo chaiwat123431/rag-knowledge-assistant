@@ -1,3 +1,4 @@
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -355,6 +356,24 @@ def test_query_gemini_auth_error_returns_500_not_503(client):
 
     assert response.status_code == 500
     assert "api key" in response.json()["detail"].lower()
+
+
+def test_query_embedding_download_failure_returns_503(client):
+    # Regression test: every /query call embeds the question
+    # (VectorStore.query), so a cold-start embedding-model download
+    # hiccup is at least as reachable here as on /documents (which this
+    # exact fix was already applied to) -- confirmed via /code-review
+    # that without it, this fell through to a bare, undiagnosed 500.
+    class StoreThatFailsToEmbed:
+        def query(self, question, top_k=5):
+            raise httpx.ConnectError("simulated network failure")
+
+    c = client(StoreThatFailsToEmbed())
+
+    response = c.post("/query", json={"question": "a real question"})
+
+    assert response.status_code == 503
+    assert "backend unavailable" in response.json()["detail"].lower()
 
 
 # --- /query conversation history --------------------------------------------

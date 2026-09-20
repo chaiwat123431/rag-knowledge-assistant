@@ -8,8 +8,9 @@ domain errors into deliberate status codes:
 - 400 for bad input (empty question, unreadable/unsupported/empty file)
 - 503 when a backend is *transiently* unavailable — Ollama not running or
   timing out, Gemini unreachable or erroring server-side, or the
-  embedding model can't be fetched on first ingest; retrying later may
-  succeed
+  embedding model can't be fetched (a cold-start download hiccup —
+  possible on *either* endpoint, since `/query` embeds the question just
+  as `/documents` embeds each chunk); retrying later may succeed
 - 500 for a non-retryable backend misconfiguration — Ollama is up but the
   requested model was never pulled (`OllamaModelNotFoundError`), or
   Gemini rejected a missing/invalid API key (`GeminiAuthError`); a human
@@ -226,6 +227,18 @@ def query(
         # Backend unreachable, timed out, or erroring server-side — a
         # transient problem, not a client error; retrying later may work.
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except (OSError, httpx.HTTPError) as exc:
+        # The embedding model's cold-start download (every VectorStore.query
+        # call embeds the question) can fail the same way ingest_document's
+        # identical catch below handles — see that comment. Every query
+        # embeds a question via VectorStore.query, so this path is at least
+        # as likely to hit a cold-cache download hiccup as /documents is;
+        # verified directly that without this, the failure fell through to
+        # a bare, undiagnosed 500 instead of this 503.
+        raise HTTPException(
+            status_code=503,
+            detail=f"could not process query (backend unavailable): {exc}",
+        ) from exc
 
     return QueryResponse(
         answer=result["answer"],
