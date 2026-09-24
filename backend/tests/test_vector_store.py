@@ -147,3 +147,42 @@ def test_add_documents_empty_chunk_list_is_a_noop(tmp_path, monkeypatch):
     monkeypatch.setattr(vector_store_module, "embed_texts", _fail_if_called)
 
     VectorStore(tmp_path).add_documents([], source="doc.md")  # must not raise
+
+
+def _add_raw(store, source, n):
+    """Store `n` chunks under `source` with fixed fake vectors — enough for
+    get/delete, which never embed, without loading the real model."""
+    store._collection.add(
+        ids=[f"{source}::{i}" for i in range(n)],
+        documents=[f"{source} chunk {i}" for i in range(n)],
+        embeddings=[[float(i + 1)] + [0.0] * 383 for i in range(n)],
+        metadatas=[{"source": source, "chunk_index": i} for i in range(n)],
+    )
+
+
+def test_delete_document_removes_only_that_source(tmp_path, monkeypatch):
+    def _fail_if_called(*args, **kwargs):
+        pytest.fail("embed_texts was called by delete_document")
+
+    monkeypatch.setattr(vector_store_module, "embed_texts", _fail_if_called)
+    store = VectorStore(tmp_path)
+    _add_raw(store, "a.txt", 3)
+    _add_raw(store, "b.txt", 2)
+
+    assert store.delete_document("a.txt") == 3
+
+    remaining = store._collection.get()["metadatas"]
+    assert sorted(m["source"] for m in remaining) == ["b.txt", "b.txt"]
+
+
+def test_delete_document_unknown_source_returns_zero(tmp_path):
+    store = VectorStore(tmp_path)
+    _add_raw(store, "a.txt", 1)
+
+    assert store.delete_document("missing.txt") == 0
+    assert store._collection.count() == 1
+
+
+def test_delete_document_rejects_empty_source(tmp_path):
+    with pytest.raises(ValueError):
+        VectorStore(tmp_path).delete_document("  ")
