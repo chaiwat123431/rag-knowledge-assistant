@@ -13,10 +13,17 @@ See [PLANNING.md](./PLANNING.md) for architecture decisions, measurements and ra
 ![Chat UI screenshot: a question about an uploaded text file, the assistant's answer with numbered citation markers, and the two cited source chunks listed below it](./docs/screenshot.png)
 
 The demo runs the production configuration: Gemini as the LLM, ONNX embeddings, a single shared
-Chroma store. It's a **single-user portfolio deployment with no auth** — anything you upload is
-visible to the next visitor, so don't upload anything private. The first request after a period of
-inactivity can take a while: the backend may be waking up, and on a fresh instance the embedding
-model (~90MB) is downloaded on first use.
+Chroma store. Two things to know before trying it:
+
+- **It's a single-user portfolio deployment with no auth** — anything you upload is visible to the
+  next visitor, so don't upload anything private.
+- **Uploaded documents are not stored permanently.** The backend host has no persistent disk, so the
+  Chroma store lives on the instance's ephemeral filesystem and **starts empty again after every
+  deploy or restart**. If you ask a question and get "I don't have information about that in your documents" with no sources, the store has
+  probably just been reset: upload a document first.
+
+The first request after a deploy can take a while: on a fresh instance the embedding model (~90MB)
+is downloaded on first use.
 
 ## How it works
 
@@ -52,7 +59,8 @@ uvicorn app.main:app --reload
 
 - API: http://localhost:8000 (`/health`, interactive docs at `/docs`)
 - The embedding model downloads on the first upload or query (~90MB, cached afterwards).
-- Chroma data lives in `backend/chroma_db/` (gitignored).
+- Chroma data lives in `backend/chroma_db/` (gitignored). Locally it persists across restarts; on
+  the live demo it doesn't (see above).
 
 **Frontend**
 
