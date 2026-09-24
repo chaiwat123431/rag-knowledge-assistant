@@ -34,7 +34,9 @@ Query:      question (+ history) -> embed -> retrieve top-k -> relevance filteri
 ```
 
 - **Backend** — Python, FastAPI. `POST /documents` (upload + index), `POST /query`
-  (`{question, top_k?, history?}` -> `{answer, has_context, citations}`), `GET /health`.
+  (`{question, top_k?, history?}` -> `{answer, has_context, citations}`), `GET /health`, and an
+  admin-only `DELETE /documents/{source}` (requires an `X-Admin-Token` header matching
+  `ADMIN_TOKEN`; disabled — 404 — when `ADMIN_TOKEN` is unset).
 - **Vector store** — Chroma, persisted locally (cosine similarity).
 - **Embeddings** — `all-MiniLM-L6-v2`, run locally through ONNX Runtime. No API key, no per-request cost.
 - **LLM** — Ollama (`llama3.2`) locally for development, Google Gemini (Flash, free tier) in

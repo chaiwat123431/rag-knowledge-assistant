@@ -29,6 +29,8 @@ nesting). Each chunk is stored with:
   (``f"{source}::{chunk_index}"``), fetching neighbouring chunks to widen
   context later, and retrieval debugging.
 
+``source`` is also the handle `delete_document` removes a document by.
+
 Char offsets, file hashes, timestamps and page numbers are deliberately
 left out until a feature needs them (the chunker rejoins words on single
 spaces, so exact source offsets aren't recoverable anyway).
@@ -166,6 +168,34 @@ class VectorStore:
                 ]
             }
         )
+
+    def delete_document(self, source: str) -> int:
+        """Remove every chunk stored under `source`.
+
+        Metadata-only: nothing is embedded, so this never loads the
+        embedding model.
+
+        Args:
+            source: the document identifier chunks were added under (the
+                same value `add_documents` received).
+
+        Returns:
+            How many chunks were deleted — 0 if `source` isn't in the store.
+
+        Raises:
+            ValueError: if `source` is empty.
+        """
+        if not isinstance(source, str) or not source.strip():
+            raise ValueError("source must be a non-empty string")
+
+        collection = self._collection
+        # Look the ids up first rather than a bare delete(where=...), which
+        # doesn't report how many rows it removed — callers need that to
+        # tell "deleted" from "no such document".
+        ids = collection.get(where={"source": source}, include=[])["ids"]
+        if ids:
+            collection.delete(ids=ids)
+        return len(ids)
 
     def query(self, question: str, top_k: int = 5) -> list[dict]:
         """Return the `top_k` stored chunks nearest to `question`.

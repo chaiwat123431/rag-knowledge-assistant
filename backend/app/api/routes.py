@@ -18,6 +18,15 @@ domain errors into deliberate status codes:
 
 Genuinely unexpected failures still surface as 500 — that's correct.
 
+Admin: deleting a document
+--------------------------
+`DELETE /documents/{source}` removes one document's chunks. The demo is
+public with no user auth, so an open DELETE would let any visitor wipe
+the shared store — it requires an `X-Admin-Token` header matching the
+`ADMIN_TOKEN` environment variable. With `ADMIN_TOKEN` unset (or blank),
+the endpoint answers 404 as if it didn't exist: deleting is opt-in per
+deployment, never on by default.
+
 Dependencies
 ------------
 `get_vector_store` is an `lru_cache`d factory: one `VectorStore` for the
@@ -41,12 +50,13 @@ LLM call.
 """
 
 import os
+import secrets
 import tempfile
 from functools import lru_cache
 from pathlib import Path
 from typing import Callable
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, Header, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 
 from app.ingestion.chunker import chunk_text
@@ -166,6 +176,11 @@ class QueryResponse(BaseModel):
 class IngestResponse(BaseModel):
     source: str
     chunks_added: int
+
+
+class DeleteResponse(BaseModel):
+    source: str
+    chunks_deleted: int
 
 
 # --- endpoints ------------------------------------------------------------
@@ -321,3 +336,63 @@ def ingest_document(
         ) from exc
 
     return IngestResponse(source=file.filename, chunks_added=len(chunks))
+
+
+def require_admin_token(
+    x_admin_token: str | None = Header(default=None),
+) -> None:
+    """Gate for admin-only endpoints — see the module docstring's "Admin"
+    section.
+
+    Re-reads `ADMIN_TOKEN` on every call, like `get_llm`, so tests can
+    `monkeypatch.setenv` without a cache to clear.
+    """
+    expected = (os.environ.get("ADMIN_TOKEN") or "").strip()
+    if not expected:
+        # Disabled on this deployment: indistinguishable from a route that
+        # doesn't exist, rather than advertising an admin surface.
+        raise HTTPException(status_code=404, detail="Not Found")
+    # compare_digest so the check's timing doesn't leak how much of a
+    # guessed token matched.
+    if x_admin_token is None or not secrets.compare_digest(
+        x_admin_token.encode(), expected.encode()
+    ):
+        raise HTTPException(status_code=401, detail="invalid or missing admin token")
+
+
+@router.delete(
+    "/documents/{source}",
+    response_model=DeleteResponse,
+    dependencies=[Depends(require_admin_token)],
+    responses={
+        401: {"description": "Missing or wrong X-Admin-Token"},
+        404: {
+            "description": (
+                "No such document, or deletion disabled (ADMIN_TOKEN unset)"
+            )
+        },
+        503: {"description": "Vector store unavailable"},
+    },
+)
+def delete_document(
+    source: str,
+    store: VectorStore = Depends(get_vector_store),
+) -> DeleteResponse:
+    try:
+        deleted = store.delete_document(source)
+    except ValueError as exc:
+        # whitespace-only source, e.g. DELETE /documents/%20
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except OSError as exc:
+        # A Chroma read/write failure — same "backend not ready" bucket as
+        # ingest_document's indexing failures.
+        raise HTTPException(
+            status_code=503,
+            detail=f"could not delete document (backend unavailable): {exc}",
+        ) from exc
+
+    if deleted == 0:
+        raise HTTPException(
+            status_code=404, detail=f"no document named {source!r} in the store"
+        )
+    return DeleteResponse(source=source, chunks_deleted=deleted)

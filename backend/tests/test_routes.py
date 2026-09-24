@@ -38,6 +38,13 @@ class FakeStore:
     def add_documents(self, chunks, source):
         self.added.append((source, list(chunks)))
 
+    def delete_document(self, source):
+        if not source.strip():
+            raise ValueError("source must be a non-empty string")
+        deleted = sum(len(c) for s, c in self.added if s == source)
+        self.added = [(s, c) for s, c in self.added if s != source]
+        return deleted
+
 
 def _result(text, source, chunk_index, score):
     return {
@@ -566,6 +573,107 @@ def test_documents_no_filename_part_is_rejected(client):
     )
 
     assert response.status_code in (400, 422)
+
+
+# --- DELETE /documents/{source} (admin) -------------------------------------
+
+ADMIN_TOKEN = "s3cret-token"
+
+
+def _store_with(*docs):
+    store = FakeStore()
+    for source, chunks in docs:
+        store.add_documents(chunks, source)
+    return store
+
+
+def test_delete_document_removes_only_that_source(client, monkeypatch):
+    monkeypatch.setenv("ADMIN_TOKEN", ADMIN_TOKEN)
+    store = _store_with(("a.txt", ["a1", "a2"]), ("b.txt", ["b1"]))
+    c = client(store)
+
+    response = c.delete("/documents/a.txt", headers={"X-Admin-Token": ADMIN_TOKEN})
+
+    assert response.status_code == 200
+    assert response.json() == {"source": "a.txt", "chunks_deleted": 2}
+    assert store.added == [("b.txt", ["b1"])]
+
+
+def test_delete_document_handles_url_encoded_source(client, monkeypatch):
+    monkeypatch.setenv("ADMIN_TOKEN", ADMIN_TOKEN)
+    store = _store_with(("my notes.txt", ["x"]))
+    c = client(store)
+
+    response = c.delete(
+        "/documents/my%20notes.txt", headers={"X-Admin-Token": ADMIN_TOKEN}
+    )
+
+    assert response.status_code == 200
+    assert store.added == []
+
+
+def test_delete_unknown_document_returns_404(client, monkeypatch):
+    monkeypatch.setenv("ADMIN_TOKEN", ADMIN_TOKEN)
+    c = client(_store_with(("a.txt", ["a1"])))
+
+    response = c.delete("/documents/nope.txt", headers={"X-Admin-Token": ADMIN_TOKEN})
+
+    assert response.status_code == 404
+    assert "nope.txt" in response.json()["detail"]
+
+
+@pytest.mark.parametrize("headers", [{}, {"X-Admin-Token": "wrong"}, {"X-Admin-Token": ""}])
+def test_delete_without_valid_token_returns_401_and_keeps_data(
+    client, monkeypatch, headers
+):
+    monkeypatch.setenv("ADMIN_TOKEN", ADMIN_TOKEN)
+    store = _store_with(("a.txt", ["a1"]))
+    c = client(store)
+
+    response = c.delete("/documents/a.txt", headers=headers)
+
+    assert response.status_code == 401
+    assert store.added == [("a.txt", ["a1"])]
+
+
+@pytest.mark.parametrize("admin_token", [None, "", "   "])
+def test_delete_is_disabled_when_admin_token_unset(client, monkeypatch, admin_token):
+    # Unset/blank ADMIN_TOKEN: 404 even with a token supplied — and above
+    # all, a blank server-side token must never match a blank header.
+    if admin_token is None:
+        monkeypatch.delenv("ADMIN_TOKEN", raising=False)
+    else:
+        monkeypatch.setenv("ADMIN_TOKEN", admin_token)
+    store = _store_with(("a.txt", ["a1"]))
+    c = client(store)
+
+    response = c.delete("/documents/a.txt", headers={"X-Admin-Token": ""})
+
+    assert response.status_code == 404
+    assert store.added == [("a.txt", ["a1"])]
+
+
+def test_delete_whitespace_source_returns_400(client, monkeypatch):
+    monkeypatch.setenv("ADMIN_TOKEN", ADMIN_TOKEN)
+    c = client(FakeStore())
+
+    response = c.delete("/documents/%20", headers={"X-Admin-Token": ADMIN_TOKEN})
+
+    assert response.status_code == 400
+
+
+def test_delete_store_failure_returns_503(client, monkeypatch):
+    monkeypatch.setenv("ADMIN_TOKEN", ADMIN_TOKEN)
+
+    class FailingStore(FakeStore):
+        def delete_document(self, source):
+            raise OSError("chroma write failed")
+
+    c = client(FailingStore())
+
+    response = c.delete("/documents/a.txt", headers={"X-Admin-Token": ADMIN_TOKEN})
+
+    assert response.status_code == 503
 
 
 # --- end-to-end through real retrieval --------------------------------------
