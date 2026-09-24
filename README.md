@@ -19,8 +19,8 @@ Chroma store. Two things to know before trying it:
   next visitor, so don't upload anything private.
 - **Uploaded documents are not stored permanently.** The backend host has no persistent disk, so the
   Chroma store lives on the instance's ephemeral filesystem and **starts empty again after every
-  deploy or restart**. If you ask a question and get "I don't have information about that in your documents" with no sources, the store has
-  probably just been reset: upload a document first.
+  deploy or restart**. If every question gets "I don't have information about that in your
+  documents" with no sources, the store has probably just been reset: upload a document first.
 
 The first request after a deploy can take a while: on a fresh instance the embedding model (~90MB)
 is downloaded on first use.
